@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NCP engine smoke test</title>
+<style>
+    body { font-family: ui-monospace, Menlo, Consolas, monospace; margin: 1.5rem; }
+    h1 { font-size: 1.1rem; }
+    pre { background: #f4f4f4; padding: 1rem; overflow: auto; }
+    .pass { color: #0a7a0a; }
+    .fail { color: #b00020; }
+</style>
+</head>
+<body>
+<h1>NCP-VGC-Damage-Calculator headless smoke test (gen 10 / Champions)</h1>
+<pre id="out">running...</pre>
+
+<!--
+  Load order mirrors upstream index.html (script_res/*), minus the setdex files
+  and ap_calc.js which we deliberately do not vendor. jQuery first, then data,
+  then damage files, then ko_chance, then our scaffold.
+-->
+<script src="vendor/jquery.min.js"></script>
+<script src="vendor/pokedex.js"></script>
+<script src="vendor/stat_data.js"></script>
+<script src="vendor/type_data.js"></script>
+<script src="vendor/nature_data.js"></script>
+<script src="vendor/ability_data.js"></script>
+<script src="vendor/item_data.js"></script>
+<script src="vendor/move_data.js"></script>
+<script src="vendor/damage_MASTER.js"></script>
+<script src="vendor/damage_SV.js"></script>
+<script src="vendor/damage_xy.js"></script>
+<script src="vendor/damage_dpp.js"></script>
+<script src="vendor/damage_rse.js"></script>
+<script src="vendor/damage_gsc.js"></script>
+<script src="vendor/damage_rby.js"></script>
+<script src="vendor/ko_chance.js"></script>
+<script src="scaffold.js"></script>
+
+<script>
+(function () {
+    "use strict";
+
+    var lines = [];
+    function log(s) { lines.push(s); }
+    function pass(s) { lines.push("PASS " + s); }
+    function fail(s) { lines.push("FAIL " + s); }
+    function render() { document.getElementById("out").textContent = lines.join("\n"); }
+
+    // --- 1. readiness + info ------------------------------------------------
+    if (!window.CalcEngine || !CalcEngine.ready) {
+        fail("CalcEngine.ready is not true");
+        render();
+        return;
+    }
+    pass("CalcEngine.ready");
+    log("CalcEngine.info = " + JSON.stringify(CalcEngine.info));
+
+    // --- 2. Reg M-C megas ---------------------------------------------------
+    var megas = ["Salamence-Mega", "Raichu-Mega-Y", "Floette-Mega", "Golisopod-Mega", "Metagross-Mega"];
+    log("");
+    log("Regulation M-C mega species checks:");
+    megas.forEach(function (name) {
+        var resolved = CalcEngine.resolveSpecies(name);
+        if (resolved) {
+            pass(name + " -> dex key \"" + resolved + "\"");
+        } else {
+            fail(name + " not found");
+        }
+    });
+
+    // --- helpers to build engine objects by hand ----------------------------
+    // The engine expects rawStats already computed. For gen 10 the UI uses
+    // CALC_HP_CHAMP / CALC_STAT_CHAMP, which are DOM-based, so we reproduce
+    // their formulas here.
+    function champHP(base, sps) {
+        return Math.floor((base * 2 + 31) * 50 / 100) + 50 + 10 + sps;
+    }
+    function champStat(base, sps, nature, stat) {
+        var natureMods = NATURES[nature];
+        var mod = natureMods[0] === stat ? 1.1 : natureMods[1] === stat ? 0.9 : 1;
+        return Math.floor(((Math.floor((base * 2 + 31) * 50 / 100) + 5) + sps) * mod);
+    }
+
+    function makeMove(name, overrides) {
+        var base = moves[name];
+        if (!base) throw new Error("unknown move: " + name);
+        return $.extend({}, base, {
+            name: name,
+            bp: base.bp || 0,
+            type: base.type,
+            category: base.category,
+            isCrit: false,
+            isZ: false,
+            hits: 1,
+            isDouble: 0,
+            combinePledge: 0,
+            timesAffected: 0,
+            usedOppMoveIndex: 0,
+            getsStellarBoost: false,
+            isPlusMove: false,
+        }, overrides || {});
+    }
+
+    function makePokemon(spec) {
+        var dexEntry = pokedex[CalcEngine.resolveSpecies(spec.species)];
+        if (!dexEntry) throw new Error("unknown species: " + spec.species);
+
+        var rawStats = {};
+        var sps = {};
+        var evs = {};
+        var ivs = {};
+        var boosts = {};
+        STATS.forEach(function (stat) {
+            sps[stat] = spec.sps[stat] || 0;
+            evs[stat] = 0;
+            ivs[stat] = 31;
+            boosts[stat] = 0;
+            rawStats[stat] = champStat(dexEntry.bs[stat], sps[stat], spec.nature, stat);
+        });
+        var hpSps = spec.sps.hp || 0;
+        var maxHP = champHP(dexEntry.bs.hp, hpSps);
+
+        return {
+            name: CalcEngine.resolveSpecies(spec.species),
+            type1: dexEntry.t1,
+            type2: dexEntry.t2 || "",
+            tera_type: "",
+            level: 50,
+            maxHP: maxHP,
+            curHP: maxHP,
+            HPSPs: hpSps,
+            HPEVs: 0,
+            HPIVs: 31,
+            HPraw: maxHP,
+            isDynamax: false,
+            gmax_factor: false,
+            isTerastalize: false,
+            rawStats: rawStats,
+            boosts: boosts,
+            stats: {},
+            sps: sps,
+            evs: evs,
+            ivs: ivs,
+            nature: spec.nature,
+            ability: spec.ability,
+            abilityOn: spec.abilityOn !== undefined ? spec.abilityOn : false,
+            supremeOverlord: 0,
+            rivalryGender: "",
+            highestStat: -1,
+            item: spec.item,
+            status: "Healthy",
+            toxicCounter: 0,
+            moves: spec.moves.map(function (m) { return makeMove(m.name, m.overrides); }),
+            glaiveRushMod: false,
+            weight: dexEntry.w,
+            canEvolve: dexEntry.canEvolve || false,
+            isTransformed: false,
+            hasType: CalcEngine.setHasType,
+        };
+    }
+
+    function makeSide(overrides) {
+        return $.extend({
+            format: "Doubles",
+            terrain: "",
+            weather: "",
+            isGravity: false,
+            isSR: false,
+            spikes: 0,
+            isReflect: false,
+            isLightScreen: false,
+            isForesight: false,
+            isHelpingHand: false,
+            isFriendGuard: false,
+            isBattery: false,
+            isProtect: false,
+            isPowerSpot: false,
+            isSteelySpirit: false,
+            isNeutralizingGas: false,
+            isGMaxField: false,
+            isFlowerGiftSpD: false,
+            isFlowerGiftAtk: false,
+            isTailwind: false,
+            isSaltCure: false,
+            isAuroraVeil: false,
+            isSwamp: false,
+            isSeaFire: false,
+            isRedItem: false,
+            isBlueItem: false,
+            isCharge: false,
+            isLeechSeed: false,
+            isIngrain: false,
+            isCurse: false,
+            isBinding: false,
+            isAquaRing: false,
+            isNightmare: false,
+        }, overrides || {});
+    }
+
+    function makeField() {
+        return {
+            format: "Doubles",
+            weather: "",
+            terrain: "",
+            isGravity: false,
+            isIngrain: false,
+            isNeutralizingGas: false,
+            getNeutralGas: function () { return false; },
+            getWeather: function () { return ""; },
+            getTerrain: function () { return ""; },
+            getTailwind: function () { return false; },
+            getSwamp: function () { return false; },
+            getSide: function () { return makeSide(); },
+            clearWeather: function () { this.weather = ""; },
+        };
+    }
+
+    // --- 3. the known matchup ----------------------------------------------
+    log("");
+    log("Building matchup and calling CalcEngine.calcAllMoves ...");
+
+    var p1, p2, field, results;
+    try {
+        p1 = makePokemon({
+            species: "Salamence-Mega",
+            nature: "Timid",
+            ability: "Intimidate",
+            abilityOn: true,
+            item: "Salamencite",
+            sps: { hp: 2, at: 0, df: 0, sa: 32, sd: 0, sp: 32 },
+            moves: [
+                { name: "Draco Meteor" },
+                { name: "Hyper Voice" },
+                { name: "Flamethrower" },
+                { name: "Protect" },
+            ],
+        });
+        p2 = makePokemon({
+            species: "Kingambit",
+            nature: "Adamant",
+            ability: "Defiant",
+            abilityOn: true,
+            item: "Chople Berry",
+            sps: { hp: 32, at: 32, df: 0, sa: 0, sd: 2, sp: 0 },
+            moves: [
+                { name: "Kowtow Cleave" },
+                { name: "Sucker Punch" },
+                { name: "Iron Head" },
+                { name: "Protect" },
+            ],
+        });
+        field = makeField();
+        results = CalcEngine.calcAllMoves(p1, p2, field);
+        pass("calcAllMoves returned without throwing");
+    } catch (err) {
+        fail("calcAllMoves threw: " + (err && err.stack ? err.stack : err));
+        render();
+        return;
+    }
+
+    log("");
+    log("p1 = " + p1.name + "  HP " + p1.maxHP + "  rawStats " + JSON.stringify(p1.rawStats));
+    log("p2 = " + p2.name + "  HP " + p2.maxHP + "  rawStats " + JSON.stringify(p2.rawStats));
+
+    log("");
+    log("p1 -> p2 damaging moves:");
+    for (var i = 0; i < 4; i++) {
+        var move = p1.moves[i];
+        var result = results[0][i];
+        if (move.category === "Status") {
+            log("  " + move.name + ": status move (damage " + JSON.stringify(result.damage) + ")");
+            continue;
+        }
+        var ko = CalcEngine.getKOChanceText(result.damage, move, p2, field.getSide(1), false, p1.item === "");
+        log("  " + move.name + ":");
+        log("    damage rolls = " + JSON.stringify(result.damage));
+        log("    description  = " + result.description);
+        log("    KO chance    = " + ko);
+    }
+
+    log("");
+    log("Full raw result object:");
+    log(JSON.stringify(results, null, 2));
+
+    render();
+})();
+</script>
+</body>
+</html>

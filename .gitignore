@@ -8,4 +8,5 @@ cache/
 .pytest_cache/
 .cache
 .venv
-.playwright-mcp
+.playwright-mcp/
+*.log

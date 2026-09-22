@@ -1,0 +1,51 @@
+# Refresh the pre-baked MunchStats data and commit the regenerated docs/.
+#
+# GitHub Pages serves docs/ straight from the branch, so this workflow is the
+# only thing that keeps the static site's data current. It runs daily and can
+# be triggered by hand from the Actions tab (workflow_dispatch).
+name: Refresh static data
+
+on:
+  schedule:
+    # 06:00 UTC every day.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+# Needed to push the refreshed docs/ back to the branch.
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Rebuild docs/ from MunchStats
+        # This hits the live MunchStats API. On a fresh runner the disk cache
+        # is empty, so the full fetch runs (a few minutes).
+        run: uv run python build_static.py
+
+      - name: Commit refreshed docs/ if anything changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/
+          if git diff --cached --quiet; then
+            echo "No data changes; nothing to commit."
+          else
+            git commit -m "chore: refresh baked MunchStats data"
+            git push
+          fi

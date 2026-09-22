@@ -67,7 +67,10 @@ Then open <http://localhost:5000> in your browser.
   `cache.py` is a small on-disk TTL cache.
 - **Frontend (vanilla JS):** `static/app.js` owns the UI and state,
   `static/matrix.js` builds and renders the heatmap and detail panel, and
-  `static/scoring.js` ranks the best-4 subsets. No build step.
+  `static/scoring.js` ranks the best-4 subsets. `static/datasource.js` is the
+  data-access abstraction: it routes every request to either the Flask API or
+  the pre-baked static JSON, and `static/showdown_parser.js` is the browser
+  port of the Python parser. No build step.
 - **Damage engine:** vendored under `static/calc/` (loaded as global scripts,
   wrapped by `static/calc/scaffold.js` and `static/calc/adapter.js`). Damage is
   computed **client-side**; the Python side never computes damage.
@@ -91,6 +94,71 @@ Then open <http://localhost:5000> in your browser.
   example — so they surface as an "unknown item" warning and are ignored in
   damage calcs; unknown items/species are never silently guessed.
 
+## Deploying to GitHub Pages
+
+The app can also run as a **fully static site** with no backend. GitHub Pages
+has no server, and MunchStats sends no CORS headers, so the tournament/usage
+data is **pre-baked into JSON at build time** and the Showdown parser runs in
+the browser.
+
+### Build `docs/`
+
+```bash
+uv run python build_static.py
+```
+
+This fetches MunchStats data (using the same 24h disk cache as the Flask app),
+strips the payloads down to the fields the UI uses, and writes a `docs/` folder:
+`index.html`, the frontend assets, and `data/{tournaments,teams,spreads,manifest}.json`.
+
+Useful flags:
+
+```bash
+uv run python build_static.py --tournaments 5          # only the 5 most recent
+uv run python build_static.py --tournaments id1,id2    # specific tournaments
+uv run python build_static.py --days all,day2          # only these day filters
+```
+
+If `docs/data/` would exceed 50 MB, the script automatically reduces scope:
+it keeps `day2`/`top16`/`top8` for every tournament and `all` only for the 5
+most recent, printing a warning explaining the reduction.
+
+> `docs/` is a **build artifact** generated from `static/` + `templates/`. Do
+> not hand-edit it — edit the sources and re-run the build. It is committed on
+> purpose so GitHub Pages can serve it.
+
+### Enable Pages
+
+1. Commit `docs/` and push to `main`.
+2. In the repository: **Settings → Pages → Source: Deploy from a branch**,
+   branch **`main`**, folder **`/docs`**.
+3. The site is served at `https://<user>.github.io/<repo>/` (the build uses
+   relative paths, so a project subpath works).
+
+### What works in static mode
+
+- **Everything except server-side fetching.** Tournaments, teams, day filters,
+  the matrix, best-4, the team filter, and pasting team text all work.
+- **pokepaste URLs work too.** `pokepast.es/<id>/raw` returns
+  `Access-Control-Allow-Origin: *`, so the browser fetches pastes directly. The
+  JS parser (`static/showdown_parser.js`) is a faithful port of the Python one.
+- **Data is only as fresh as the last build.** The daily Action below refreshes
+  it; there is no live upstream call at runtime.
+- A day filter or Pokémon that was not baked resolves to an empty result with a
+  friendly note rather than an error.
+
+### Daily refresh Action
+
+`.github/workflows/refresh-data.yml` runs `build_static.py` every day at 06:00
+UTC and commits the regenerated `docs/` if anything changed. Trigger it by hand
+from **Actions → Refresh static data → Run workflow**.
+
+### Being polite
+
+MunchStats and pokepaste are community services. If you host this publicly, keep
+the build's request delay, avoid aggressive refresh schedules, and don't hammer
+the upstream APIs from the browser.
+
 ## Development
 
 Run the Python test suite. pytest lives in the project venv, so use `uv`:
@@ -111,6 +179,8 @@ The browser-side tests are plain HTML pages you can open directly:
 - `static/calc/test.html` — engine smoke test
 - `static/calc/adapter.test.html` — adapter round-trip tests
 - `static/scoring.test.html` — best-4 scoring tests
+- `static/datasource.test.html` — JS Showdown parser vs. the Python parser
+  (cross-language equivalence) and the shared Pokémon slug function
 
 ## Regenerating the vendored engine
 
