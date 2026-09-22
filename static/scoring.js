@@ -20,6 +20,25 @@
     var W_PROTECT = 0.25;          // having Protect (tiebreaker only)
     var REDUNDANCY_PENALTY = 0.5;  // per pair sharing a primary type or item
 
+    // --- Lead-scoring weights (see rankLeads) ---
+    // pressure: how hard the pair hits their whole team (best offense of the two).
+    // safety:   how well the pair survives their whole team (mean defense of the two).
+    // speed:    how often the pair moves first (both/one outspeeds each opponent).
+    var W_LEAD_PRESSURE = 1.0;
+    var W_LEAD_SAFETY = 0.5;
+    var W_LEAD_SPEED = 0.8;
+
+    // --- Lead tempo bonuses (flat, per lead pair; several can stack) ---
+    // WHY: these are opening-move/ability advantages that the damage matrix
+    // cannot see. Small, named, and deliberately weaker than a full KO tier.
+    var TEMPO_FAKE_OUT = 1.5;      // Fake Out on either lead
+    var TEMPO_INTIMIDATE = 1.0;    // Intimidate on either lead
+    var TEMPO_REDIRECTION = 1.0;   // Follow Me / Rage Powder on either lead
+    var TEMPO_TAILWIND = 1.0;      // Tailwind on either lead
+    var TEMPO_TRICK_ROOM = 0.5;    // Trick Room on either lead
+
+    var REDIRECTION_MOVES = ["Follow Me", "Rage Powder"];
+
     // Penalty applied to any subset that includes a Pokemon with unevaluated
     // pairings. Large enough that a fully resolvable subset always beats one
     // containing an unknown Pokemon, but not so large it overflows.
@@ -134,17 +153,16 @@
     // ------------------------------------------------------------------
 
     /**
-     * Rank every four-mon subset.
-     * @param {object} model - from Matrix.buildModel
-     * @returns {object} ranking result (see below)
+     * Per-mon offense/defense vectors against each opponent. Entries are
+     * ``null`` for unknown pairings (excluded from the sums). Shared by the
+     * subset ranking and the lead ranking.
+     * @param {object} model
+     * @returns {object[]}
      */
-    function rank(model) {
+    function buildPerMon(model) {
         var my = model.my || [];
         var oppCount = (model.opp || []).length;
-
-        // Per-mon offense/defense vectors against each opponent. Entries are
-        // ``null`` for unknown pairings (excluded from the sums).
-        var perMon = my.map(function (set, i) {
+        return my.map(function (set, i) {
             var offense = [];
             var defense = [];
             var unknownCount = 0;
@@ -173,6 +191,17 @@
                 item: set.item || "",
             };
         });
+    }
+
+    /**
+     * Rank every four-mon subset.
+     * @param {object} model - from Matrix.buildModel
+     * @returns {object} ranking result (see below)
+     */
+    function rank(model) {
+        var my = model.my || [];
+        var oppCount = (model.opp || []).length;
+        var perMon = buildPerMon(model);
 
         var subsets = combinations(my.length, 4).map(function (idxs) {
             var coverage = 0;
@@ -285,6 +314,180 @@
     }
 
     // ------------------------------------------------------------------
+    // Lead scoring
+    // ------------------------------------------------------------------
+
+    /** True when the set carries the named move. */
+    function hasMove(set, name) {
+        return (set.moves || []).indexOf(name) !== -1;
+    }
+
+    /**
+     * Flat tempo bonuses for one lead. Returns the total plus the human tags
+     * that earned it, so the pair's reasons can name them.
+     * @param {object} set
+     * @returns {{total:number, tags:string[]}}
+     */
+    function tempoFor(set) {
+        var total = 0;
+        var tags = [];
+        if (hasMove(set, "Fake Out")) { total += TEMPO_FAKE_OUT; tags.push("Fake Out pressure"); }
+        if (set.ability === "Intimidate") { total += TEMPO_INTIMIDATE; tags.push("Intimidate"); }
+        if (REDIRECTION_MOVES.some(function (m) { return hasMove(set, m); })) {
+            total += TEMPO_REDIRECTION;
+            tags.push("redirection");
+        }
+        if (hasMove(set, "Tailwind")) { total += TEMPO_TAILWIND; tags.push("Tailwind"); }
+        if (hasMove(set, "Trick Room")) { total += TEMPO_TRICK_ROOM; tags.push("Trick Room"); }
+        return { total: total, tags: tags };
+    }
+
+    /**
+     * One short line per reason for the best lead pair.
+     * @param {object} pair
+     * @param {object[]} perMon
+     * @param {object} model
+     * @returns {string[]}
+     */
+    function leadReasons(pair, perMon, model) {
+        var oppCount = (model.opp || []).length;
+        var mySpeed = model.mySpeed || [];
+        var oppSpeed = model.oppSpeed || [];
+        var a = perMon[pair.indices[0]];
+        var b = perMon[pair.indices[1]];
+        var reasons = [];
+
+        var bothOutspeed = 0;
+        var oneOutspeeds = 0;
+        var ties = [];
+        for (var j = 0; j < oppCount; j++) {
+            var sa = mySpeed[a.index];
+            var sb = mySpeed[b.index];
+            var so = oppSpeed[j];
+            if (sa != null && so != null && sa === so) ties.push(model.opp[j].species);
+            if (sb != null && so != null && sb === so) ties.push(model.opp[j].species);
+            if (sa == null || sb == null || so == null) continue;
+            var outs = (sa > so ? 1 : 0) + (sb > so ? 1 : 0);
+            if (outs === 2) bothOutspeed++;
+            if (outs >= 1) oneOutspeeds++;
+        }
+        if (bothOutspeed === oppCount && oppCount > 0) {
+            reasons.push("outspeeds all " + oppCount);
+        } else if (oneOutspeeds > 0) {
+            reasons.push("outspeeds " + oneOutspeeds + " of " + oppCount);
+        }
+
+        var ohkos = 0;
+        var survivesAll = oppCount > 0;
+        for (var k = 0; k < oppCount; k++) {
+            var bestOff = Math.max(a.offense[k] || 0, b.offense[k] || 0);
+            if (bestOff >= 2.5) ohkos++;
+            if ((a.defense[k] == null || a.defense[k] < 3) ||
+                (b.defense[k] == null || b.defense[k] < 3)) {
+                survivesAll = false;
+            }
+        }
+        if (ohkos > 0) reasons.push("OHKOs " + ohkos + " of their mons");
+        if (survivesAll) reasons.push("survives everything");
+
+        tempoFor(a.set).tags.forEach(function (t) { if (reasons.indexOf(t) === -1) reasons.push(t); });
+        tempoFor(b.set).tags.forEach(function (t) { if (reasons.indexOf(t) === -1) reasons.push(t); });
+
+        ties.forEach(function (name) {
+            var line = "Speed tie with " + name;
+            if (reasons.indexOf(line) === -1) reasons.push(line);
+        });
+        return reasons;
+    }
+
+    /**
+     * Rank the C(4,2) = 6 lead pairs drawn from the recommended 4.
+     *
+     * ASSUMPTION: their leads are unknown, so every pair is scored against ALL
+     * of their Pokemon, not a presumed pair. Speed is the unboosted stat from
+     * the model (no Tailwind / Trick Room / boosts).
+     *
+     * @param {object} model - from Matrix.buildModel
+     * @param {object} subset - the recommended 4 (uses subset.indices)
+     * @returns {{pairs:object[], best:(object|null), caveats:string[]}}
+     */
+    function rankLeads(model, subset) {
+        var perMon = buildPerMon(model);
+        var oppCount = (model.opp || []).length;
+        var mySpeed = model.mySpeed || [];
+        var oppSpeed = model.oppSpeed || [];
+
+        var caveats = [
+            "Speeds are unboosted: no Tailwind, Trick Room, or stat boosts are modelled.",
+            "Their leads are unknown, so each pair is scored against all " + oppCount +
+                " of their Pokemon.",
+        ];
+        var trickRoomUsers = (model.opp || []).filter(function (set) {
+            return hasMove(set, "Trick Room");
+        }).length;
+        if (trickRoomUsers >= 2) {
+            caveats.push("Their team has " + trickRoomUsers +
+                " Trick Room users; Trick Room may invert the speed logic.");
+        }
+
+        var indices = (subset && subset.indices) ? subset.indices : [];
+        // A lead we cannot evaluate must never be suggested: drop any mon with
+        // unknown pairings or an entirely null offense/defense vector.
+        var known = indices.map(function (i) { return perMon[i]; }).filter(function (m) {
+            if (!m || m.unknownCount > 0) return false;
+            var allNull = m.offense.every(function (p) { return p == null; }) &&
+                m.defense.every(function (p) { return p == null; });
+            return !allNull;
+        });
+
+        if (known.length < 2) {
+            return { pairs: [], best: null, caveats: caveats };
+        }
+
+        var pairs = combinations(known.length, 2).map(function (combo) {
+            var a = known[combo[0]];
+            var b = known[combo[1]];
+            var pressure = 0;
+            var safety = 0;
+            var speed = 0;
+            var sa = mySpeed[a.index];
+            var sb = mySpeed[b.index];
+            for (var j = 0; j < oppCount; j++) {
+                pressure += Math.max(a.offense[j] || 0, b.offense[j] || 0);
+                safety += ((a.defense[j] || 0) + (b.defense[j] || 0)) / 2;
+                var so = oppSpeed[j];
+                if (sa == null || sb == null || so == null) continue;
+                var outs = (sa > so ? 1 : 0) + (sb > so ? 1 : 0);
+                if (outs === 2) speed += 1;
+                else if (outs === 1) speed += 0.5;
+            }
+            var tempo = tempoFor(a.set).total + tempoFor(b.set).total;
+            return {
+                indices: [a.index, b.index],
+                setA: a.set,
+                setB: b.set,
+                pressure: pressure,
+                safety: safety,
+                speed: speed,
+                tempo: tempo,
+                score: pressure * W_LEAD_PRESSURE + safety * W_LEAD_SAFETY +
+                    speed * W_LEAD_SPEED + tempo,
+                reasons: [],
+            };
+        });
+
+        pairs.sort(function (x, y) {
+            if (y.score !== x.score) return y.score - x.score;
+            return y.pressure - x.pressure;
+        });
+
+        var best = pairs[0] || null;
+        if (best) best.reasons = leadReasons(best, perMon, model);
+
+        return { pairs: pairs, best: best, caveats: caveats };
+    }
+
+    // ------------------------------------------------------------------
     // Rendering
     // ------------------------------------------------------------------
 
@@ -325,11 +528,71 @@
     function renderTopPick(result) {
         var box = el("div", "b4-pick");
         box.appendChild(el("h3", null, "Recommended bring"));
-        result.reasons.forEach(function (item) {
+        // Sort by contribution (bringScore desc), NOT team order: the bring
+        // order carries no lead meaning, so most-valuable-first is the only
+        // useful ordering.
+        var byScore = result.perMon.slice().sort(function (a, b) {
+            return b.bringScore - a.bringScore;
+        });
+        var rankOf = {};
+        byScore.forEach(function (m, i) { rankOf[m.index] = i; });
+        var ordered = result.reasons.slice().sort(function (x, y) {
+            return rankOf[x.index] - rankOf[y.index];
+        });
+        ordered.forEach(function (item) {
             var row = el("div", "b4-pick-row");
             row.appendChild(el("span", "b4-pick-name", item.set.species));
             row.appendChild(el("span", "b4-pick-reason muted", item.reason));
             box.appendChild(row);
+        });
+        box.appendChild(el("p", "muted small",
+            "Sorted by contribution to the bring, not by lead order."));
+        return box;
+    }
+
+    /** One lead pair as a prominent card. */
+    function leadCard(pair, label, prominent) {
+        var card = el("div", "b4-lead" + (prominent ? " b4-lead-best" : ""));
+        var head = el("div", "b4-lead-head");
+        head.appendChild(el("span", "b4-lead-label", label));
+        head.appendChild(el("span", "b4-lead-names",
+            pair.setA.species + " + " + pair.setB.species));
+        head.appendChild(el("span", "b4-lead-score", pair.score.toFixed(2)));
+        card.appendChild(head);
+
+        var chips = el("div", "b4-lead-reasons");
+        pair.reasons.forEach(function (r) {
+            chips.appendChild(el("span", "b4-chip", r));
+        });
+        card.appendChild(chips);
+
+        card.appendChild(el("div", "b4-breakdown muted small",
+            "pressure " + pair.pressure.toFixed(1) + " \u00d7 " + W_LEAD_PRESSURE +
+            " + safety " + pair.safety.toFixed(1) + " \u00d7 " + W_LEAD_SAFETY +
+            " + speed " + pair.speed.toFixed(1) + " \u00d7 " + W_LEAD_SPEED +
+            " + tempo " + pair.tempo.toFixed(1) +
+            " = " + pair.score.toFixed(2)));
+        return card;
+    }
+
+    function renderLeads(leads) {
+        var box = el("div", "b4-leads");
+        box.appendChild(el("h3", null, "Suggested leads"));
+        box.appendChild(el("p", "muted small",
+            "The best 2 to open with, chosen from the recommended 4."));
+
+        if (!leads || !leads.best) {
+            box.appendChild(el("p", "empty muted small",
+                "Need at least 2 evaluable Pokemon in the recommended bring to suggest leads."));
+            return box;
+        }
+
+        box.appendChild(leadCard(leads.best, "Lead", true));
+        if (leads.pairs[1]) {
+            box.appendChild(leadCard(leads.pairs[1], "Alternative", false));
+        }
+        leads.caveats.forEach(function (c) {
+            box.appendChild(el("p", "muted small b4-caveat", c));
         });
         return box;
     }
@@ -427,6 +690,8 @@
         }
 
         host.appendChild(renderTopPick(result));
+        var leads = rankLeads(model, result.top);
+        host.appendChild(renderLeads(leads));
         host.appendChild(renderTopSubsets(result, result.perMon));
         host.appendChild(renderTable(result));
         renderSidebar(result);
@@ -439,6 +704,7 @@
 
     window.Scoring = {
         rank: rank,
+        rankLeads: rankLeads,
         render: render,
         offensePoints: offensePoints,
         defensePoints: defensePoints,
@@ -447,6 +713,8 @@
         weights: {
             coverage: W_COVERAGE, threat: W_THREAT, utility: W_UTILITY,
             protect: W_PROTECT, redundancy: REDUNDANCY_PENALTY,
+            leadPressure: W_LEAD_PRESSURE, leadSafety: W_LEAD_SAFETY,
+            leadSpeed: W_LEAD_SPEED,
         },
     };
 })();

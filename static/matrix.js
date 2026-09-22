@@ -215,13 +215,38 @@
         ].join(",");
     }
 
-    /** maxHP via the engine; null when the species is unknown to it. */
-    function maxHPOf(set) {
+    /**
+     * Engine-derived stat lookup; null when the species is unknown to it.
+     *
+     * `key` is either "maxHP" (the computed max HP) or a raw stat key
+     * ("at"|"df"|"sa"|"sd"|"sp") read from the engine's unboosted rawStats.
+     * @param {object} set - normalized set
+     * @param {string} key
+     * @returns {number|null}
+     */
+    function statOf(set, key) {
         try {
-            return window.CalcEngine.buildPokemon(set, []).maxHP;
+            var pokemon = window.CalcEngine.buildPokemon(set, []);
+            return key === "maxHP" ? pokemon.maxHP : pokemon.rawStats[key];
         } catch (err) {
             return null;
         }
+    }
+
+    /** maxHP via the engine; null when the species is unknown to it. */
+    function maxHPOf(set) {
+        return statOf(set, "maxHP");
+    }
+
+    /**
+     * Unboosted Speed stat at the set's SPs/nature; null when unknown.
+     *
+     * This is the raw Speed stat only. It does NOT account for Tailwind,
+     * Trick Room, stat boosts, Choice Scarf, or any other in-battle modifier.
+     * Lead scoring compares these numbers directly.
+     */
+    function speedOf(set) {
+        return statOf(set, "sp");
     }
 
     /**
@@ -245,6 +270,8 @@
         var field = (state && state.field) || {};
         var myHP = my.map(maxHPOf);
         var oppHP = opp.map(maxHPOf);
+        var mySpeed = my.map(speedOf);
+        var oppSpeed = opp.map(speedOf);
         var fsig = fieldSig(field);
         var pairings = [];
         var warnings = [];
@@ -294,6 +321,8 @@
             opp: opp,
             myHP: myHP,
             oppHP: oppHP,
+            mySpeed: mySpeed,
+            oppSpeed: oppSpeed,
             pairings: pairings,
             warnings: warnings,
             unknownSpecies: unresolved,
@@ -619,6 +648,7 @@
         bestMove: bestMove,
         offenseHeat: offenseHeat,
         defenseBadge: defenseBadge,
+        speedOf: speedOf,
         clearCache: function () { cache.clear(); },
         getSelected: function () { return selected; },
     };

@@ -189,6 +189,98 @@
             pass("unknown mon is not among the recommended reasons");
         }
 
+        // ================================================================
+        // Suggested leads
+        // ================================================================
+
+        // --- synthetic model helpers (drive rankLeads without the engine) ---
+        function koTier(damaging) {
+            return damaging
+                ? { damaging: true, minHits: 1, guaranteed: true }
+                : { damaging: false, minHits: null, guaranteed: false };
+        }
+        function fakePairing(off, def) {
+            return { unknown: false, myBest: { ko: koTier(off) }, theirBest: { ko: koTier(def) } };
+        }
+        function fakeModel(mySpeed, oppSpeed, opts) {
+            opts = opts || {};
+            var my = mySpeed.map(function (sp, i) {
+                return {
+                    species: "Mine" + i, level: 50, nature: "Adamant",
+                    ability: (opts.abilities && opts.abilities[i]) || "",
+                    item: "", teraType: "", terastallized: false,
+                    sps: { hp: 0, at: 0, df: 0, sa: 0, sd: 0, sp: 0 },
+                    moves: (opts.moves && opts.moves[i]) || ["Protect"],
+                };
+            });
+            var opp = oppSpeed.map(function (sp, j) {
+                return {
+                    species: "Theirs" + j, level: 50, nature: "Adamant",
+                    ability: "", item: "", teraType: "", terastallized: false,
+                    sps: { hp: 0, at: 0, df: 0, sa: 0, sd: 0, sp: 0 },
+                    moves: (opts.oppMoves && opts.oppMoves[j]) || ["Protect"],
+                };
+            });
+            var pairings = my.map(function (_, i) {
+                return opp.map(function (__, j) {
+                    if (opts.unknown && opts.unknown[i]) {
+                        return { unknown: true, myBest: null, theirBest: null };
+                    }
+                    return fakePairing(true, true);
+                });
+            });
+            return { my: my, opp: opp, mySpeed: mySpeed, oppSpeed: oppSpeed, pairings: pairings, field: {} };
+        }
+        function findPair(pairs, idxs) {
+            var want = idxs.slice().sort(function (a, b) { return a - b; }).join(",");
+            return pairs.filter(function (p) {
+                return p.indices.slice().sort(function (a, b) { return a - b; }).join(",") === want;
+            })[0];
+        }
+
+        // --- unknown lead is never selected as best ------------------------
+        var unknownLeads = window.Scoring.rankLeads(model, { indices: [0, 1, 2, unknownIndex] });
+        truthy(unknownLeads.best && unknownLeads.best.indices.indexOf(unknownIndex) === -1,
+            "best lead pair never contains the unknown Pokemon");
+        truthy(unknownLeads.pairs.every(function (p) {
+            return p.indices.indexOf(unknownIndex) === -1;
+        }), "no enumerated lead pair contains the unknown Pokemon");
+
+        // --- exactly 6 lead pairs from a 4-mon subset ----------------------
+        var sixModel = fakeModel([100, 110, 10, 20], [50, 40]);
+        var six = window.Scoring.rankLeads(sixModel, { indices: [0, 1, 2, 3] });
+        eq(six.pairs.length, 6, "C(4,2) lead pairs enumerated for a 4-mon subset");
+
+        // --- speed scoring: both / one / neither ---------------------------
+        var bothPair = findPair(six.pairs, [0, 1]);
+        eq(bothPair.speed, 2, "speed: both leads outspeed all opponents");
+        var neitherPair = findPair(six.pairs, [2, 3]);
+        eq(neitherPair.speed, 0, "speed: neither lead outspeeds any opponent");
+        var onePair = findPair(six.pairs, [0, 2]);
+        eq(onePair.speed, 1, "speed: exactly one lead outspeeds each opponent");
+
+        // --- tempo: Fake Out + Intimidate ----------------------------------
+        var tempoModel = fakeModel([100, 110, 10, 20], [50, 40], {
+            abilities: ["Intimidate", "", "", ""],
+            moves: [["Fake Out", "Protect"], ["Protect"], ["Protect"], ["Protect"]],
+        });
+        var tempoLeads = window.Scoring.rankLeads(tempoModel, { indices: [0, 1, 2, 3] });
+        var tempoPair = findPair(tempoLeads.pairs, [0, 1]);
+        truthy(tempoPair.tempo >= 2.5,
+            "tempo: Fake Out (+1.5) and Intimidate (+1.0) both apply (got " + tempoPair.tempo + ")");
+        truthy(tempoPair.reasons.indexOf("Fake Out pressure") !== -1,
+            "tempo reason names Fake Out pressure");
+        truthy(tempoPair.reasons.indexOf("Intimidate") !== -1,
+            "tempo reason names Intimidate");
+
+        // --- fewer than 2 known Pokemon -> best is null, no crash ----------
+        var oneKnownModel = fakeModel([100, 110, 10, 20], [50, 40], {
+            unknown: { 1: true, 2: true, 3: true },
+        });
+        var oneKnown = window.Scoring.rankLeads(oneKnownModel, { indices: [0, 1, 2, 3] });
+        eq(oneKnown.best, null, "best lead is null when fewer than 2 known Pokemon exist");
+        eq(oneKnown.pairs.length, 0, "no lead pairs enumerated when fewer than 2 known Pokemon exist");
+
         render();
     }
 

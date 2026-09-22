@@ -630,3 +630,42 @@ h3 { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.04em; colo
 
 .b4-sidebar { font-size: 0.8rem; }
 .b4-sidebar-names { font-weight: 600; margin: 0 0 0.2rem; }
+
+/* ------------------------------------------------------------ suggested leads */
+
+.b4-lead {
+    background: var(--bg-panel-2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 0.5rem 0.6rem;
+    margin-bottom: 0.4rem;
+}
+.b4-lead-best {
+    border-color: var(--accent);
+    border-left-color: var(--accent);
+    background: var(--accent-soft);
+}
+.b4-lead-head { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+.b4-lead-label {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    padding: 0 0.35rem;
+}
+.b4-lead-best .b4-lead-label { color: var(--accent-hover); border-color: var(--accent); }
+.b4-lead-names { flex: 1; font-size: 0.92rem; font-weight: 700; }
+.b4-lead-score { font-weight: 700; font-size: 0.88rem; }
+.b4-lead-reasons { display: flex; flex-wrap: wrap; gap: 0.25rem; margin: 0.35rem 0 0.2rem; }
+.b4-chip {
+    font-size: 0.68rem;
+    background: var(--bg-input);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    padding: 0.05rem 0.45rem;
+    color: var(--text);
+}
+.b4-caveat { margin: 0.25rem 0 0; }
