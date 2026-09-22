@@ -18,6 +18,7 @@
     var SPRITE_SHEET_CELL_W = 40;
     var SPRITE_SHEET_CELL_H = 30;
     var MY_TEAM_STORAGE_KEY = "pmv.myTeam";
+    var TEAM_FILTER_STORAGE_KEY = "pmv.teamFilter";
 
     // Monotonically increasing request tokens. Async loaders capture the
     // current token before awaiting and only mutate state if it is still the
@@ -66,6 +67,7 @@
         selectedTournament: null,
         day: "all",
         teams: [],             // from /api/tournaments/<id>/teams
+        teamFilter: "",        // raw text in the team-name filter ("" = show all)
         selectedTeam: null,    // one entry from teams[]
         oppTeam: [],           // normalized sets built from selectedTeam + chosen spreads
         oppSpreads: {},        // { [pokemonName]: {spreads:[...], chosenIndex:0, matched:bool} }
@@ -440,24 +442,135 @@
         return loadTeams();
     }
 
+    /**
+     * Normalize a Pokemon name for forgiving filter matching.
+     *
+     * Rule: lowercase, then strip hyphens, spaces and periods. This makes
+     * "Salamence Mega", "salamence-mega" and "SalamenceMega" all normalize to
+     * "salamencemega", so they match the species "Salamence-Mega". Matching is
+     * substring-based, so "Salamence" also matches "Salamence-Mega".
+     * @param {string} s
+     * @returns {string}
+     */
+    function normalizeName(s) {
+        return String(s == null ? "" : s)
+            .toLowerCase()
+            .replace(/[-\s.]/g, "");
+    }
+
+    /**
+     * Split the raw filter into normalized, non-empty terms.
+     * A trailing comma (or blank term) is ignored rather than matching nothing.
+     * @param {string} query
+     * @returns {string[]}
+     */
+    function filterTerms(query) {
+        return String(query || "")
+            .split(",")
+            .map(normalizeName)
+            .filter(function (term) { return term.length > 0; });
+    }
+
+    /**
+     * Filter state.teams by the current state.teamFilter.
+     *
+     * AND semantics: every comma-separated term must appear as a substring of
+     * at least one of the team's species names (terms may match different
+     * members). Matching is against mon.pokemon only -- never item, ability,
+     * nature or moves.
+     *
+     * Each result keeps its ORIGINAL index into state.teams so selectTeam()
+     * receives the correct full-array index even when the list is filtered.
+     * @returns {{team:object, index:number}[]}
+     */
+    function getFilteredTeams() {
+        var terms = filterTerms(state.teamFilter);
+        if (!terms.length) {
+            return state.teams.map(function (team, index) {
+                return { team: team, index: index };
+            });
+        }
+        return state.teams.reduce(function (acc, team, index) {
+            var species = (team.team || []).map(function (mon) {
+                return normalizeName(mon.pokemon);
+            });
+            var matchesAll = terms.every(function (term) {
+                return species.some(function (name) { return name.indexOf(term) !== -1; });
+            });
+            if (matchesAll) acc.push({ team: team, index: index });
+            return acc;
+        }, []);
+    }
+
+    /** Persist the team filter so a refresh keeps it. Best-effort. */
+    function saveTeamFilter() {
+        try {
+            localStorage.setItem(TEAM_FILTER_STORAGE_KEY, state.teamFilter);
+        } catch (err) {
+            // Private mode / quota: persistence is best-effort only.
+        }
+    }
+
+    /** Restore the persisted team filter into state (does not re-render). */
+    function restoreTeamFilter() {
+        try {
+            var raw = localStorage.getItem(TEAM_FILTER_STORAGE_KEY);
+            if (raw != null) state.teamFilter = raw;
+        } catch (err) {
+            // Corrupt/unavailable storage: start with no filter.
+        }
+    }
+
+    /**
+     * Set the team filter, persist it and re-render the list (no re-fetch).
+     * @param {string} query
+     */
+    function setTeamFilter(query) {
+        state.teamFilter = String(query == null ? "" : query);
+        var input = $("team-filter");
+        if (input && input.value !== state.teamFilter) input.value = state.teamFilter;
+        saveTeamFilter();
+        renderTeamList();
+    }
+
     /** Render the clickable team list for the current tournament. */
     function renderTeamList() {
         var list = $("team-list");
         var count = $("team-count");
+        var clearBtn = $("team-filter-clear");
         list.innerHTML = "";
-        count.textContent = state.teams.length ? state.teams.length + " shown" : "";
 
-        if (!state.teams.length) {
+        var filtered = getFilteredTeams();
+        var filterActive = filterTerms(state.teamFilter).length > 0;
+        var total = state.teams.length;
+
+        if (clearBtn) clearBtn.hidden = state.teamFilter.length === 0;
+
+        if (!total) {
+            count.textContent = "";
             list.innerHTML = '<p class="empty muted">' +
                 (state.selectedTournament ? "No teams for this filter." : "Select a tournament.") +
                 "</p>";
             return;
         }
 
-        state.teams.forEach(function (team, index) {
+        count.textContent = filterActive
+            ? filtered.length + " of " + total + " teams"
+            : total + " teams";
+
+        if (!filtered.length) {
+            list.innerHTML = '<p class="empty muted">No teams match &quot;' +
+                escapeHtml(state.teamFilter.trim()) + "&quot;.</p>";
+            return;
+        }
+
+        filtered.forEach(function (entry) {
+            var team = entry.team;
             var row = document.createElement("div");
             row.className = "team-row" + (state.selectedTeam === team ? " selected" : "");
-            row.dataset.index = String(index);
+            // Keep the ORIGINAL state.teams index so a filtered row still
+            // selects the right team (see getFilteredTeams).
+            row.dataset.index = String(entry.index);
 
             var record = team.record || {};
             var head = document.createElement("div");
@@ -477,7 +590,7 @@
             });
             row.appendChild(sprites);
 
-            row.addEventListener("click", function () { selectTeam(index); });
+            row.addEventListener("click", function () { selectTeam(entry.index); });
             list.appendChild(row);
         });
     }
@@ -934,6 +1047,14 @@
             btn.addEventListener("click", function () { setDay(btn.dataset.day); });
         });
 
+        $("team-filter").addEventListener("input", function (e) {
+            setTeamFilter(e.target.value);
+        });
+        $("team-filter-clear").addEventListener("click", function () {
+            setTeamFilter("");
+            $("team-filter").focus();
+        });
+
         initFieldControls();
     }
 
@@ -947,6 +1068,9 @@
         loadTournaments: loadTournaments,
         selectTournament: selectTournament,
         setDay: setDay,
+        setTeamFilter: setTeamFilter,
+        getFilteredTeams: getFilteredTeams,
+        normalizeName: normalizeName,
         selectTeam: selectTeam,
         setOppSpread: setOppSpread,
         setOppTerastallized: setOppTerastallized,
@@ -959,6 +1083,9 @@
         checkEngine();
         initControls();
         restoreMyTeam();
+        restoreTeamFilter();
+        $("team-filter").value = state.teamFilter;
+        renderTeamList();
         loadTournaments();
         recompute();
     }

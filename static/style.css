@@ -146,6 +146,10 @@ h3 { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.04em; colo
 .collapsible { margin-top: 0.5rem; }
 .collapsible[hidden] { display: none; }
 
+.team-filter-row { align-items: center; }
+.team-filter-row .text-input { flex: 1 1 auto; min-width: 0; }
+.team-filter-row .btn { flex: 0 0 auto; padding: 0.3rem 0.5rem; }
+
 /* ------------------------------------------------------------ day filter */
 
 .day-filters {

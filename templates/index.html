@@ -70,9 +70,17 @@
 
                 <div id="opp-status" class="status" role="status" aria-live="polite"></div>
 
+                <label class="field-label" for="team-filter">Filter teams by Pokémon</label>
+                <div class="row team-filter-row">
+                    <input type="text" id="team-filter" class="text-input"
+                           placeholder="e.g. Rillaboom, Incineroar" autocomplete="off">
+                    <button type="button" id="team-filter-clear" class="btn btn-ghost btn-small"
+                            hidden aria-label="Clear team filter">&times;</button>
+                </div>
+
                 <div class="panel-head">
                     <h3>Teams</h3>
-                    <span id="team-count" class="muted small"></span>
+                    <span id="team-count" class="muted small" role="status" aria-live="polite"></span>
                 </div>
                 <div id="team-list" class="team-list">
                     <p class="empty muted">Select a tournament.</p>
