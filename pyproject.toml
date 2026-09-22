@@ -1,0 +1,19 @@
+[project]
+name = "pokemon-matchup-visualizer"
+version = "0.1.0"
+description = "Interactive Pokemon VGC matchup visualizer"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "flask>=3.0",
+    "requests>=2.32",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>scoring.js + matrix.js validation (HIGH-1 no-data)</title>
+<style>
+    body { font-family: ui-monospace, Menlo, Consolas, monospace; margin: 1.5rem; line-height: 1.45; }
+    h1 { font-size: 1.1rem; }
+    pre { background: #f4f4f4; padding: 1rem; overflow: auto; }
+    .summary { font-size: 1.05rem; margin-top: 1.5rem; padding: .6rem; border: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<h1>scoring.js / matrix.js validation (HIGH-1: unknown Pokemon)</h1>
+<pre id="out">running...</pre>
+
+<!--
+  Same engine load order as adapter.test.html, then matrix.js + scoring.js
+  (which app.js normally loads). No app.js: this page drives the model and
+  ranking directly.
+-->
+<script src="calc/vendor/jquery.min.js"></script>
+<script src="calc/vendor/pokedex.js"></script>
+<script src="calc/vendor/stat_data.js"></script>
+<script src="calc/vendor/type_data.js"></script>
+<script src="calc/vendor/nature_data.js"></script>
+<script src="calc/vendor/ability_data.js"></script>
+<script src="calc/vendor/item_data.js"></script>
+<script src="calc/vendor/move_data.js"></script>
+<script src="calc/vendor/damage_MASTER.js"></script>
+<script src="calc/vendor/damage_SV.js"></script>
+<script src="calc/vendor/damage_xy.js"></script>
+<script src="calc/vendor/damage_dpp.js"></script>
+<script src="calc/vendor/damage_rse.js"></script>
+<script src="calc/vendor/damage_gsc.js"></script>
+<script src="calc/vendor/damage_rby.js"></script>
+<script src="calc/vendor/ko_chance.js"></script>
+<script src="calc/scaffold.js"></script>
+<script src="calc/adapter.js"></script>
+<script src="matrix.js"></script>
+<script src="scoring.js"></script>
+
+<script>
+(function () {
+    "use strict";
+
+    var lines = [];
+    var passed = 0, failed = 0;
+    function log(s) { lines.push(s); }
+    function pass(s) { passed++; lines.push("PASS " + s); }
+    function fail(s) { failed++; lines.push("FAIL " + s); }
+    function info(s) { lines.push("     " + s); }
+    function render() {
+        lines.push("");
+        lines.push("==================================================");
+        lines.push((failed === 0 ? "ALL TESTS PASSED" : "TESTS FAILED") +
+            "  (" + passed + " passed, " + failed + " failed)");
+        document.getElementById("out").textContent = lines.join("\n");
+    }
+    function eq(actual, expected, label) {
+        if (actual === expected) { pass(label + " === " + expected); return true; }
+        fail(label + " expected " + expected + " but got " + actual);
+        return false;
+    }
+    function truthy(v, label) {
+        if (v) { pass(label); return true; }
+        fail(label + " (got " + JSON.stringify(v) + ")");
+        return false;
+    }
+
+    function mon(species, moves, item) {
+        return {
+            species: species, level: 50, nature: "Adamant", ability: "", item: item || "",
+            teraType: "", terastallized: false,
+            sps: { hp: 32, at: 32, df: 0, sa: 0, sd: 0, sp: 2 },
+            moves: moves,
+        };
+    }
+
+    // Amoonguss is NOT in POKEDEX_CHAMPIONS (verified against the vendored
+    // pokedex.js), so the engine cannot build it -> unknown pairings.
+    var UNKNOWN_SPECIES = "Amoonguss";
+
+    function makeState() {
+        return {
+            myTeam: [
+                mon("Garchomp", ["Earthquake", "Dragon Claw", "Rock Slide", "Protect"]),
+                mon("Kingambit", ["Kowtow Cleave", "Sucker Punch", "Iron Head", "Protect"]),
+                mon("Gholdengo", ["Make It Rain", "Shadow Ball", "Power Gem", "Protect"]),
+                mon("Incineroar", ["Flare Blitz", "Knock Off", "Parting Shot", "Fake Out"]),
+                mon("Rillaboom", ["Grassy Glide", "Wood Hammer", "Fake Out", "U-turn"]),
+                mon(UNKNOWN_SPECIES, ["Spore", "Sludge Bomb", "Pollen Puff", "Rage Powder"]),
+            ],
+            oppTeam: [
+                mon("Salamence-Mega", ["Hyper Voice", "Draco Meteor", "Flamethrower", "Protect"], "Salamencite"),
+                mon("Tyranitar-Mega", ["Rock Slide", "Knock Off", "Low Kick", "Protect"], "Tyranitarite"),
+                mon("Excadrill", ["Iron Head", "High Horsepower", "Rock Slide", "Protect"]),
+                mon("Sneasler", ["Dire Claw", "Close Combat", "Coaching", "Protect"]),
+                mon("Corviknight", ["Brave Bird", "Power Trip", "Bulk Up", "Roost"]),
+                mon("Indeedee", ["Expanding Force", "Mystical Fire", "Trick", "Protect"]),
+            ],
+            field: {},
+        };
+    }
+
+    function run() {
+        if (!window.CalcEngine || !CalcEngine.ready) {
+            fail("CalcEngine.ready is not true");
+            render();
+            return;
+        }
+        if (!window.Matrix || !window.Scoring) {
+            fail("matrix.js / scoring.js did not register");
+            render();
+            return;
+        }
+
+        // Sanity: the chosen species really is unresolvable.
+        truthy(!CalcEngine.hasSpecies(UNKNOWN_SPECIES),
+            UNKNOWN_SPECIES + " is not in the engine dex (test premise)");
+
+        var state = makeState();
+        var model = window.Matrix.buildModel(state);
+
+        // --- unknown detection -------------------------------------------------
+        var unknownIndex = model.my.length - 1;
+        var unknownRow = model.pairings[unknownIndex];
+        truthy(unknownRow.every(function (p) { return p.unknown; }),
+            "every pairing for the unknown Pokemon is flagged unknown");
+        truthy(model.unknownSpecies.indexOf(UNKNOWN_SPECIES) !== -1,
+            "model.unknownSpecies names " + UNKNOWN_SPECIES);
+        truthy(model.warnings.some(function (w) { return w.indexOf(UNKNOWN_SPECIES) !== -1; }),
+            "model.warnings surfaces the unresolvable Pokemon");
+        info("warning: " + model.warnings.filter(function (w) {
+            return w.indexOf(UNKNOWN_SPECIES) !== -1;
+        })[0]);
+
+        // Unknown cells must not render as the green "safe" heat.
+        var unknownKO = { unknown: true, damaging: false, minHits: null, maxHits: null };
+        eq(window.Matrix.offenseHeat(unknownKO), "heat-unknown", "unknown offense heat");
+        eq(window.Matrix.defenseBadge(unknownKO).cls, "def-unknown", "unknown defense badge");
+        eq(window.Matrix.defenseBadge(null).cls, "def-safe", "no-move defense badge still safe");
+
+        // --- scoring: unknown is excluded, not awarded the "none" tier --------
+        var result = window.Scoring.rank(model);
+        var unknownMon = result.perMon[unknownIndex];
+        truthy(unknownMon.unknownCount === model.opp.length,
+            "unknown mon reports unknownCount === opp count (" + unknownMon.unknownCount + ")");
+        // The old bug awarded DEFENSE_POINTS.none = 3 per pairing. Confirm the
+        // defense vector is null (excluded), not 3.
+        truthy(unknownMon.defense.every(function (p) { return p === null; }),
+            "unknown mon defense vector is all null (not the best-case 3)");
+        truthy(unknownMon.offense.every(function (p) { return p === null; }),
+            "unknown mon offense vector is all null");
+
+        // --- the actual regression: not recommended ---------------------------
+        var topIndices = result.top.indices;
+        truthy(topIndices.indexOf(unknownIndex) === -1,
+            "recommended 4 does NOT include the unresolvable Pokemon");
+        info("recommended: " + topIndices.map(function (i) {
+            return model.my[i].species;
+        }).join(", "));
+        info("per-mon bring scores:");
+        result.perMon.forEach(function (m) {
+            info("  " + m.set.species + "  off " + m.offenseSum.toFixed(1) +
+                "  def " + m.defenseSum.toFixed(1) +
+                "  bring " + m.bringScore.toFixed(2) +
+                (m.unknownCount ? "  [no data x" + m.unknownCount + "]" : ""));
+        });
+
+        // The unknown mon must rank below every resolvable mon.
+        var resolvableScores = result.perMon.filter(function (m, i) {
+            return i !== unknownIndex;
+        }).map(function (m) { return m.bringScore; });
+        var worstResolvable = Math.min.apply(null, resolvableScores);
+        truthy(unknownMon.bringScore < worstResolvable,
+            "unknown mon bring score ranks below all resolvable mons");
+
+        // Its reason must call out the missing data, never "survives everything".
+        var reason = result.reasons.filter(function (r) {
+            return r.index === unknownIndex;
+        })[0];
+        if (reason) {
+            truthy(reason.reason.indexOf("no data") !== -1,
+                "unknown mon reason mentions no data");
+            truthy(reason.reason.indexOf("survives everything") === -1,
+                "unknown mon is not described as surviving everything");
+        } else {
+            pass("unknown mon is not among the recommended reasons");
+        }
+
+        render();
+    }
+
+    try {
+        run();
+    } catch (err) {
+        fail("unexpected exception: " + (err && err.stack ? err.stack : err));
+        render();
+    }
+})();
+</script>
+</body>
+</html>

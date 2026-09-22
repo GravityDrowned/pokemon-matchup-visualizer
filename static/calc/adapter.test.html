@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>adapter.js validation</title>
+<style>
+    body { font-family: ui-monospace, Menlo, Consolas, monospace; margin: 1.5rem; line-height: 1.45; }
+    h1 { font-size: 1.1rem; }
+    h2 { font-size: 1rem; margin-top: 1.6rem; border-bottom: 1px solid #ddd; padding-bottom: 2px; }
+    pre { background: #f4f4f4; padding: 1rem; overflow: auto; }
+    .pass { color: #0a7a0a; }
+    .fail { color: #b00020; font-weight: bold; }
+    .info { color: #555; }
+    .summary { font-size: 1.05rem; margin-top: 1.5rem; padding: .6rem; border: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<h1>adapter.js validation (gen 10 / Champions)</h1>
+<pre id="out">running...</pre>
+
+<!--
+  Same load order as test.html, plus adapter.js which layers the normalized
+  public API (buildPokemon / buildField / calcSide / calcMatchup) on top of
+  scaffold.js's CalcEngine.
+-->
+<script src="vendor/jquery.min.js"></script>
+<script src="vendor/pokedex.js"></script>
+<script src="vendor/stat_data.js"></script>
+<script src="vendor/type_data.js"></script>
+<script src="vendor/nature_data.js"></script>
+<script src="vendor/ability_data.js"></script>
+<script src="vendor/item_data.js"></script>
+<script src="vendor/move_data.js"></script>
+<script src="vendor/damage_MASTER.js"></script>
+<script src="vendor/damage_SV.js"></script>
+<script src="vendor/damage_xy.js"></script>
+<script src="vendor/damage_dpp.js"></script>
+<script src="vendor/damage_rse.js"></script>
+<script src="vendor/damage_gsc.js"></script>
+<script src="vendor/damage_rby.js"></script>
+<script src="vendor/ko_chance.js"></script>
+<script src="scaffold.js"></script>
+<script src="adapter.js"></script>
+
+<script>
+(function () {
+    "use strict";
+
+    var lines = [];
+    var passed = 0, failed = 0;
+    function log(s) { lines.push(s); }
+    function pass(s) { passed++; lines.push("PASS " + s); }
+    function fail(s) { failed++; lines.push("FAIL " + s); }
+    function info(s) { lines.push("     " + s); }
+    function render() {
+        lines.push("");
+        lines.push("==================================================");
+        lines.push((failed === 0 ? "ALL TESTS PASSED" : "TESTS FAILED") +
+            "  (" + passed + " passed, " + failed + " failed)");
+        document.getElementById("out").textContent = lines.join("\n");
+    }
+
+    function eq(actual, expected, label) {
+        if (actual === expected) { pass(label + " === " + expected); return true; }
+        fail(label + " expected " + expected + " but got " + actual);
+        return false;
+    }
+    function deepEq(actual, expected, label) {
+        var a = JSON.stringify(actual), e = JSON.stringify(expected);
+        if (a === e) { pass(label + " === " + e); return true; }
+        fail(label + " expected " + e + " but got " + a);
+        return false;
+    }
+    function arrEq(actual, expected, label) {
+        var a = JSON.stringify(actual), e = JSON.stringify(expected);
+        if (a === e) { pass(label + " === " + e); return true; }
+        fail(label + " expected " + e + " but got " + a);
+        return false;
+    }
+    function contains(haystack, needle, label) {
+        if (typeof haystack === "string" && haystack.indexOf(needle) !== -1) {
+            pass(label + " contains \"" + needle + "\" (" + haystack + ")"); return true;
+        }
+        fail(label + " expected to contain \"" + needle + "\" but got " + JSON.stringify(haystack));
+        return false;
+    }
+    function truthy(v, label) {
+        if (v) { pass(label); return true; }
+        fail(label + " (got " + JSON.stringify(v) + ")"); return false;
+    }
+
+    function moveByName(sideResult, name) {
+        return sideResult.moves.filter(function (m) { return m.name === name; })[0];
+    }
+
+    // =====================================================================
+    // Test 1 -- known matchup (regression against Phase A1's verified numbers)
+    // =====================================================================
+    function test1() {
+        log("");
+        log("== Test 1: known matchup (Phase A1 regression) ==");
+
+        var mySet = {
+            species: "Salamence-Mega", level: 50, nature: "Timid", ability: "Intimidate",
+            item: "Salamencite", teraType: "", sps: { hp: 2, at: 0, df: 0, sa: 32, sd: 0, sp: 32 },
+            moves: ["Draco Meteor", "Hyper Voice", "Flamethrower", "Protect"],
+        };
+        var oppSet = {
+            species: "Kingambit", level: 50, nature: "Adamant", ability: "Defiant",
+            item: "Chople Berry", teraType: "", sps: { hp: 32, at: 32, df: 0, sa: 0, sd: 2, sp: 0 },
+            moves: ["Kowtow Cleave", "Sucker Punch", "Iron Head", "Protect"],
+        };
+
+        var mine, opp;
+        try {
+            mine = CalcEngine.buildPokemon(mySet, []);
+            opp = CalcEngine.buildPokemon(oppSet, []);
+            pass("buildPokemon returned without throwing");
+        } catch (err) {
+            fail("buildPokemon threw: " + err.message);
+            return;
+        }
+
+        eq(mine.name, "Mega Salamence", "Mega Salamence dex key");
+        eq(opp.name, "Kingambit", "Kingambit dex key");
+
+        eq(mine.maxHP, 172, "Mega Salamence maxHP");
+        deepEq(mine.rawStats, { at: 148, df: 150, sa: 172, sd: 110, sp: 189 }, "Mega Salamence rawStats");
+        eq(opp.maxHP, 207, "Kingambit maxHP");
+        deepEq(opp.rawStats, { at: 205, df: 140, sa: 72, sd: 107, sp: 70 }, "Kingambit rawStats");
+
+        var result = CalcEngine.calcMatchup(mySet, oppSet, {});
+        deepEq(result.warnings, [], "calcMatchup warnings");
+
+        var draco = moveByName(result.mine, "Draco Meteor");
+        var flame = moveByName(result.mine, "Flamethrower");
+        var kowtow = moveByName(result.theirs, "Kowtow Cleave");
+        var protect = moveByName(result.mine, "Protect");
+
+        arrEq(draco.rolls, [59, 59, 60, 60, 61, 62, 63, 63, 64, 65, 66, 66, 67, 68, 69, 69],
+            "Draco Meteor rolls");
+        contains(draco.koText, "3HKO", "Draco Meteor KO text");
+
+        arrEq(flame.rolls, [110, 110, 112, 114, 114, 116, 118, 118, 120, 122, 122, 124, 126, 126, 128, 130],
+            "Flamethrower rolls");
+        contains(flame.koText, "2HKO", "Flamethrower KO text");
+
+        eq(kowtow.min, 99, "Kowtow Cleave min");
+        eq(kowtow.max, 117, "Kowtow Cleave max");
+
+        truthy(protect.isStatus, "Protect flagged isStatus");
+        eq(protect.min, 0, "Protect min");
+        eq(protect.max, 0, "Protect max");
+
+        // percentage sanity: 59 / 207 * 100 = 28.5
+        eq(draco.minPct, 28.5, "Draco Meteor minPct");
+        // 130 / 207 * 100 = 62.8
+        eq(flame.maxPct, 62.8, "Flamethrower maxPct");
+    }
+
+    // =====================================================================
+    // Test 2 -- stat formula spot check (hand-derived)
+    // =====================================================================
+    //
+    // Formula (stat_data.js:92-119):
+    //   HP   = floor((base*2+31)*50/100) + 50 + 10 + sps
+    //   stat = floor((floor((base*2+31)*50/100) + 5 + sps) * natureMod)
+    //
+    // At level 50 the level term simplifies:
+    //   floor((base*2+31)*50/100) = floor(base + 15.5) = base + 15
+    // so  HP = base + 75 + sps   and   stat = floor((base + 20 + sps) * mod).
+    //
+    // Garchomp (bs hp108 at130 df95 sa80 sd85 sp102), Jolly (sp+ / sa-),
+    // sps {hp:2, at:32, sp:32}:
+    //   HP = 108+75+2 = 185
+    //   at = (130+20+32)*1.0 = 182
+    //   sp = (102+20+32)*1.1 = floor(169.4) = 169
+    //   sa = (80+20+0)*0.9   = 90
+    //   df = 95+20+0         = 115
+    //   sd = 85+20+0         = 105
+    //
+    // Corviknight (bs hp98 at87 df105 sa53 sd85 sp67), Careful (sd+ / sa-),
+    // sps {hp:32, sd:32, sp:2}:
+    //   HP = 98+75+32 = 205
+    //   sd = (85+20+32)*1.1 = floor(150.7) = 150
+    //   sp = 67+20+2        = 89
+    //   sa = (53+20+0)*0.9  = floor(65.7) = 65
+    //   at = 87+20+0        = 107
+    //   df = 105+20+0       = 125
+    //
+    // Sneasler (bs hp80 at130 df60 sa40 sd80 sp120), Adamant (at+ / sa-),
+    // sps {hp:2, at:32, sp:32}:
+    //   HP = 80+75+2 = 157
+    //   at = (130+20+32)*1.1 = floor(200.2) = 200
+    //   sp = 120+20+32       = 172
+    //   sa = (40+20+0)*0.9   = 54
+    //   df = 60+20+0         = 80
+    //   sd = 80+20+0         = 100
+    //
+    // Indeedee (bs hp60 at65 df55 sa105 sd95 sp95), Modest (sa+ / at-),
+    // sps {hp:0, df:2, sa:32, sp:32}:
+    //   HP = 60+75+0 = 135
+    //   sa = (105+20+32)*1.1 = floor(172.7) = 172
+    //   df = 55+20+2         = 77
+    //   sp = 95+20+32        = 147
+    //   at = (65+20+0)*0.9   = floor(76.5) = 76
+    //   sd = 95+20+0         = 115
+    function test2() {
+        log("");
+        log("== Test 2: stat formula spot check ==");
+
+        var cases = [
+            {
+                label: "Garchomp (Jolly)",
+                set: { species: "Garchomp", nature: "Jolly", ability: "Sand Veil", item: "",
+                       sps: { hp: 2, at: 32, df: 0, sa: 0, sd: 0, sp: 32 }, moves: ["Earthquake"] },
+                hp: 185, stats: { at: 182, df: 115, sa: 90, sd: 105, sp: 169 },
+            },
+            {
+                label: "Corviknight (Careful)",
+                set: { species: "Corviknight", nature: "Careful", ability: "Mirror Armor", item: "",
+                       sps: { hp: 32, at: 0, df: 0, sa: 0, sd: 32, sp: 2 }, moves: ["Brave Bird"] },
+                hp: 205, stats: { at: 107, df: 125, sa: 65, sd: 150, sp: 89 },
+            },
+            {
+                label: "Sneasler (Adamant)",
+                set: { species: "Sneasler", nature: "Adamant", ability: "Unburden", item: "",
+                       sps: { hp: 2, at: 32, df: 0, sa: 0, sd: 0, sp: 32 }, moves: ["Close Combat"] },
+                hp: 157, stats: { at: 200, df: 80, sa: 54, sd: 100, sp: 172 },
+            },
+            {
+                label: "Indeedee (Modest)",
+                set: { species: "Indeedee", nature: "Modest", ability: "Psychic Surge", item: "",
+                       sps: { hp: 0, at: 0, df: 2, sa: 32, sd: 0, sp: 32 }, moves: ["Expanding Force"] },
+                hp: 135, stats: { at: 76, df: 77, sa: 172, sd: 115, sp: 147 },
+            },
+        ];
+
+        cases.forEach(function (c) {
+            var p = CalcEngine.buildPokemon(c.set, []);
+            eq(p.maxHP, c.hp, c.label + " maxHP");
+            deepEq(p.rawStats, c.stats, c.label + " rawStats");
+        });
+    }
+
+    // =====================================================================
+    // Test 3 -- field toggles
+    // =====================================================================
+    function test3() {
+        log("");
+        log("== Test 3: field toggles ==");
+
+        // Weather: Indeedee's Surf (Water) and Flamethrower (Fire) into
+        // Corviknight. Rain boosts Water, dampens Fire.
+        var weatherAtk = {
+            species: "Indeedee", nature: "Modest", ability: "Psychic Surge", item: "",
+            sps: { hp: 0, at: 0, df: 2, sa: 32, sd: 0, sp: 32 },
+            moves: ["Surf", "Flamethrower"],
+        };
+        var target = {
+            species: "Corviknight", nature: "Careful", ability: "Mirror Armor", item: "",
+            sps: { hp: 32, at: 0, df: 0, sa: 0, sd: 32, sp: 2 },
+            moves: ["Brave Bird"],
+        };
+
+        var neutral = CalcEngine.calcSide(weatherAtk, target, {});
+        var rain = CalcEngine.calcSide(weatherAtk, target, { weather: "Rain" });
+
+        var surfN = moveByName(neutral, "Surf"), surfR = moveByName(rain, "Surf");
+        var fireN = moveByName(neutral, "Flamethrower"), fireR = moveByName(rain, "Flamethrower");
+
+        info("Surf neutral " + surfN.min + "-" + surfN.max + " -> rain " + surfR.min + "-" + surfR.max);
+        info("Flamethrower neutral " + fireN.min + "-" + fireN.max + " -> rain " + fireR.min + "-" + fireR.max);
+        truthy(surfR.min > surfN.min, "Rain increases Water damage");
+        truthy(fireR.min < fireN.min, "Rain decreases Fire damage");
+
+        // Reflect: Sneasler's Close Combat (Physical) into Corviknight.
+        var physAtk = {
+            species: "Sneasler", nature: "Adamant", ability: "Unburden", item: "",
+            sps: { hp: 2, at: 32, df: 0, sa: 0, sd: 0, sp: 32 },
+            moves: ["Close Combat"],
+        };
+        var ccN = moveByName(CalcEngine.calcSide(physAtk, target, {}), "Close Combat");
+        var ccR = moveByName(CalcEngine.calcSide(physAtk, target, { reflect: true }), "Close Combat");
+        info("Close Combat neutral " + ccN.min + "-" + ccN.max + " -> reflect " + ccR.min + "-" + ccR.max);
+        truthy(ccR.min < ccN.min, "Reflect reduces physical damage");
+
+        // Light Screen: Indeedee's Surf (Special) into Corviknight.
+        var surfL = moveByName(CalcEngine.calcSide(weatherAtk, target, { lightScreen: true }), "Surf");
+        info("Surf neutral " + surfN.min + "-" + surfN.max + " -> lightScreen " + surfL.min + "-" + surfL.max);
+        truthy(surfL.min < surfN.min, "Light Screen reduces special damage");
+    }
+
+    // =====================================================================
+    // Test 4 -- graceful degradation
+    // =====================================================================
+    function test4() {
+        log("");
+        log("== Test 4: graceful degradation ==");
+
+        var good = {
+            species: "Garchomp", nature: "Jolly", ability: "Sand Veil", item: "",
+            sps: { hp: 2, at: 32, df: 0, sa: 0, sd: 0, sp: 32 }, moves: ["Earthquake"],
+        };
+
+        // Unknown species must not throw from calcMatchup.
+        var unknownSpecies = {
+            species: "Missingno", nature: "Serious", ability: "", item: "",
+            sps: { hp: 0, at: 0, df: 0, sa: 0, sd: 0, sp: 0 }, moves: ["Tackle"],
+        };
+        var r1;
+        try {
+            r1 = CalcEngine.calcMatchup(unknownSpecies, good, {});
+            pass("calcMatchup with unknown species did not throw");
+        } catch (err) {
+            fail("calcMatchup threw on unknown species: " + err.message);
+            return;
+        }
+        truthy(r1.warnings.length > 0, "unknown species produced a warning");
+        r1.warnings.forEach(function (wn) { info("warning: " + wn); });
+        eq(r1.mine.moves.length, 0, "unknown-species side has no moves");
+
+        // Unknown move is skipped, valid moves survive.
+        var unknownMove = {
+            species: "Garchomp", nature: "Jolly", ability: "Sand Veil", item: "",
+            sps: { hp: 2, at: 32, df: 0, sa: 0, sd: 0, sp: 32 },
+            moves: ["Definitely Not A Move", "Earthquake"],
+        };
+        var r2;
+        try {
+            r2 = CalcEngine.calcMatchup(unknownMove, good, {});
+            pass("calcMatchup with unknown move did not throw");
+        } catch (err) {
+            fail("calcMatchup threw on unknown move: " + err.message);
+            return;
+        }
+        truthy(r2.warnings.length > 0, "unknown move produced a warning");
+        r2.warnings.forEach(function (wn) { info("warning: " + wn); });
+        eq(r2.mine.moves.length, 1, "unknown move skipped, valid move kept");
+        eq(r2.mine.moves[0].name, "Earthquake", "kept move name");
+
+        // Unknown item/ability warn but do not throw.
+        var oddGear = {
+            species: "Garchomp", nature: "Jolly", ability: "Not An Ability", item: "Not An Item",
+            sps: { hp: 2, at: 32, df: 0, sa: 0, sd: 0, sp: 32 }, moves: ["Earthquake"],
+        };
+        var r3 = CalcEngine.calcMatchup(oddGear, good, {});
+        truthy(r3.warnings.length >= 2, "unknown item + ability produced warnings");
+        truthy(r3.mine.moves.length === 1 && r3.mine.moves[0].min > 0, "calc still produced damage");
+    }
+
+    // =====================================================================
+    // Test 5 -- full 6x6 matrix smoke
+    // =====================================================================
+    function test5() {
+        log("");
+        log("== Test 5: full 6x6 matrix smoke ==");
+
+        var myTeam = [
+            { species: "Rillaboom", nature: "Adamant", ability: "Grassy Surge", item: "Miracle Seed",
+              sps: { hp: 32, at: 32, df: 0, sa: 0, sd: 2, sp: 0 },
+              moves: ["Grassy Glide", "Wood Hammer", "Fake Out", "U-turn"] },
+            { species: "Incineroar", nature: "Careful", ability: "Intimidate", item: "Sitrus Berry",
+              sps: { hp: 32, at: 0, df: 0, sa: 0, sd: 32, sp: 2 },
+              moves: ["Flare Blitz", "Knock Off", "Parting Shot", "Fake Out"] },
+            { species: "Gholdengo", nature: "Modest", ability: "Good as Gold", item: "Life Orb",
+              sps: { hp: 2, at: 0, df: 0, sa: 32, sd: 0, sp: 32 },
+              moves: ["Make It Rain", "Shadow Ball", "Power Gem", "Protect"] },
+            { species: "Dragonite", nature: "Adamant", ability: "Multiscale", item: "Leftovers",
+              sps: { hp: 32, at: 32, df: 0, sa: 0, sd: 2, sp: 0 },
+              moves: ["Extreme Speed", "Ice Spinner", "Dragon Claw", "Protect"] },
+            { species: "Garchomp", nature: "Jolly", ability: "Rough Skin", item: "Focus Sash",
+              sps: { hp: 2, at: 32, df: 0, sa: 0, sd: 0, sp: 32 },
+              moves: ["Earthquake", "Dragon Claw", "Rock Slide", "Protect"] },
+            { species: "Sinistcha", nature: "Bold", ability: "Hospitality", item: "Leftovers",
+              sps: { hp: 32, at: 0, df: 32, sa: 0, sd: 2, sp: 0 },
+              moves: ["Matcha Gotcha", "Shadow Ball", "Life Dew", "Trick Room"] },
+        ];
+
+        // Joseph Ugarte, 1st, Baltimore 2027.
+        var oppTeam = [
+            { species: "Excadrill", nature: "Jolly", ability: "Sand Rush", item: "Focus Sash",
+              sps: { hp: 2, at: 32, df: 0, sa: 0, sd: 0, sp: 32 },
+              moves: ["Iron Head", "High Horsepower", "Rock Slide", "Protect"] },
+            { species: "Salamence-Mega", nature: "Timid", ability: "Intimidate", item: "Salamencite",
+              sps: { hp: 2, at: 0, df: 0, sa: 32, sd: 0, sp: 32 },
+              moves: ["Hyper Voice", "Draco Meteor", "Flamethrower", "Protect"] },
+            { species: "Tyranitar-Mega", nature: "Jolly", ability: "Sand Stream", item: "Tyranitarite",
+              sps: { hp: 2, at: 32, df: 0, sa: 0, sd: 0, sp: 32 },
+              moves: ["Rock Slide", "Knock Off", "Low Kick", "Protect"] },
+            { species: "Indeedee", nature: "Modest", ability: "Psychic Surge", item: "Choice Scarf",
+              sps: { hp: 0, at: 0, df: 2, sa: 32, sd: 0, sp: 32 },
+              moves: ["Expanding Force", "Mystical Fire", "Trick", "Protect"] },
+            { species: "Corviknight", nature: "Careful", ability: "Mirror Armor", item: "Psychic Seed",
+              sps: { hp: 32, at: 0, df: 0, sa: 0, sd: 32, sp: 2 },
+              moves: ["Brave Bird", "Power Trip", "Bulk Up", "Roost"] },
+            { species: "Sneasler", nature: "Adamant", ability: "Unburden", item: "White Herb",
+              sps: { hp: 2, at: 32, df: 0, sa: 0, sd: 0, sp: 32 },
+              moves: ["Dire Claw", "Close Combat", "Coaching", "Protect"] },
+        ];
+
+        var runs = 0, bad = 0, allWarnings = [];
+        myTeam.forEach(function (my, i) {
+            oppTeam.forEach(function (opp, j) {
+                runs++;
+                var res;
+                try {
+                    res = CalcEngine.calcMatchup(my, opp, {});
+                } catch (err) {
+                    bad++;
+                    fail("matchup " + i + "x" + j + " threw: " + err.message);
+                    return;
+                }
+                allWarnings = allWarnings.concat(res.warnings);
+
+                [["mine", res.mine], ["theirs", res.theirs]].forEach(function (pair) {
+                    pair[1].moves.forEach(function (m) {
+                        if (m.isStatus) return;
+                        if (!isFinite(m.min) || !isFinite(m.max) || !isFinite(m.minPct) || !isFinite(m.maxPct)) {
+                            bad++;
+                            fail("non-finite damage " + pair[0] + " " + i + "x" + j + " " + m.name);
+                        } else if (m.min > m.max) {
+                            bad++;
+                            fail("min>max " + pair[0] + " " + i + "x" + j + " " + m.name);
+                        }
+                    });
+                });
+            });
+        });
+
+        eq(runs, 36, "matchup count");
+        eq(bad, 0, "non-finite/invalid damaging results");
+        deepEq(allWarnings, [], "matrix warnings");
+        if (failed === 0) pass("all 36 matchups produced finite numbers for every damaging move");
+    }
+
+    // =====================================================================
+    // Test 6 -- multi-hit moves (normalizeRolls totals)
+    // =====================================================================
+    function test6() {
+        log("");
+        log("== Test 6: multi-hit moves ==");
+
+        var atk = {
+            species: "Sneasler", nature: "Adamant", ability: "Unburden", item: "",
+            sps: { hp: 2, at: 32, df: 0, sa: 0, sd: 0, sp: 32 },
+            moves: ["Bullet Seed", "Double Hit", "Close Combat"],
+        };
+        var def = {
+            species: "Kingambit", nature: "Adamant", ability: "Defiant", item: "",
+            sps: { hp: 32, at: 32, df: 0, sa: 0, sd: 2, sp: 0 },
+            moves: ["Kowtow Cleave"],
+        };
+
+        var res;
+        try {
+            res = CalcEngine.calcSide(atk, def, {});
+            pass("calcSide with multi-hit moves did not throw");
+        } catch (err) {
+            fail("calcSide threw: " + err.message);
+            return;
+        }
+
+        // Default hit counts: Bullet Seed (hitRange [2,5]) -> 3; Double Hit -> 2.
+        var seed = moveByName(res, "Bullet Seed");
+        var dbl = moveByName(res, "Double Hit");
+        var cc = moveByName(res, "Close Combat");
+
+        info("Bullet Seed rolls " + JSON.stringify(seed.rolls));
+        info("Double Hit rolls " + JSON.stringify(dbl.rolls));
+        info("Close Combat rolls " + JSON.stringify(cc.rolls));
+
+        eq(seed.rolls.length, 16, "Bullet Seed roll count");
+        eq(dbl.rolls.length, 16, "Double Hit roll count");
+        truthy(seed.min > 0 && seed.max > 0, "Bullet Seed has positive totals");
+        truthy(seed.max > dbl.min, "Bullet Seed (3 hits) out-damages Double Hit (2 hits)");
+        truthy(seed.koText.length > 0 && dbl.koText.length > 0, "multi-hit KO text produced");
+    }
+
+    // =====================================================================
+    // Run
+    // =====================================================================
+    if (!window.CalcEngine || !CalcEngine.ready) {
+        fail("CalcEngine.ready is not true");
+        render();
+        return;
+    }
+    if (typeof CalcEngine.buildPokemon !== "function" ||
+        typeof CalcEngine.buildField !== "function" ||
+        typeof CalcEngine.calcSide !== "function" ||
+        typeof CalcEngine.calcMatchup !== "function") {
+        fail("adapter.js public API is incomplete");
+        render();
+        return;
+    }
+    pass("adapter.js public API present");
+
+    try {
+        test1();
+        test2();
+        test3();
+        test4();
+        test5();
+        test6();
+    } catch (err) {
+        fail("unexpected exception: " + (err && err.stack ? err.stack : err));
+    }
+
+    render();
+})();
+</script>
+</body>
+</html>

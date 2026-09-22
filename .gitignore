@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.idea/
+.DS_Store
+cache/
+.pytest_cache/
+.cache
+.venv
+.playwright-mcp
