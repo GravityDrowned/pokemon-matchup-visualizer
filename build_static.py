@@ -18,8 +18,13 @@ Output layout::
     └── data/
         ├── tournaments.json
         ├── teams/{tournamentId}_{day}.json
-        ├── spreads/{pokemonSlug}.json
+        ├── spreads/{usageFormat}/{pokemonSlug}.json
         └── manifest.json
+
+``{usageFormat}`` is one of the two real MunchStats usage datasets
+(``championsdoubles`` or ``gen9championsvgc2026regmbbo3``); the frontend maps
+the selected tournament's regulation to one of them at request time. A Pokemon
+is baked under every usage format the baked tournaments map to.
 
 Usage::
 
@@ -62,13 +67,6 @@ KEEP_RECENT_ON_REDUCTION = 5
 _TEAM_FIELDS = ("name", "placement", "day_reached", "record", "team")
 _MON_FIELDS = ("pokemon", "item", "ability", "nature", "moves", "tera_type", "sprite")
 
-# Fields kept from a cleaned usage summary, plus the raw pokemon_names list
-# (names only) used to detect fuzzy substitution.
-_USAGE_FIELDS = (
-    "pokemon", "requested", "matched", "moves", "items", "abilities",
-    "natures", "tera_types", "base_stats", "types",
-)
-
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _STATIC_PATH_RE = re.compile(r'(["\'])/static/')
 
@@ -94,20 +92,26 @@ def strip_team(team: dict) -> dict:
     return out
 
 
-def strip_usage(usage: dict, pokemon_names: list) -> dict:
-    """Reduce a cleaned usage summary, dropping the huge raw fields.
+def build_spread_payload(spreads: dict, usage: dict) -> dict:
+    """Build the stripped per-format spread payload the frontend uses.
 
-    ``usage`` is the output of ``munchstats_api.get_usage`` (already cleaned).
-    ``pokemon_names`` is the raw ``pokemon_names`` list; only the names are
-    kept, since the frontend only needs them to reason about substitution.
+    Only the fields ``static/app.js`` and ``static/datasource.js`` read are
+    kept: the spread list, ranked natures, the fallback-chain provenance, the
+    source label, and the base stats/types the assumed-spread fallback needs.
+    Moves/items/abilities are dropped -- the UI never uses them.
     """
-    out = {key: usage.get(key) for key in _USAGE_FIELDS if key in usage}
-    out["pokemon_names"] = [
-        entry[0]
-        for entry in (pokemon_names or [])
-        if isinstance(entry, (list, tuple)) and entry
-    ]
-    return out
+    return {
+        "spreads": spreads.get("spreads") or [],
+        "natures": spreads.get("natures") or [],
+        "matched": spreads.get("matched", False),
+        "requested": spreads.get("requested", ""),
+        "resolved": spreads.get("resolved", ""),
+        "source": spreads.get("source", ""),
+        "sourceLabel": spreads.get("sourceLabel", ""),
+        "natureInferred": spreads.get("natureInferred", False),
+        "base_stats": usage.get("base_stats") or [],
+        "types": usage.get("types") or [],
+    }
 
 
 def reduce_all_scope(
@@ -175,6 +179,46 @@ def _is_cached(key: str) -> bool:
 def _polite_pause(key: str) -> None:
     """Sleep before an uncached upstream request (cache hits skip the wait)."""
     if not _is_cached(key):
+        time.sleep(REQUEST_DELAY)
+
+
+def _resolve_cache_keys(name: str, usage_format: str) -> list[str]:
+    """Cache keys for every attempt in the munchstats fallback chain.
+
+    Mirrors ``munchstats_api._resolve`` for a given usage dataset: exact name
+    in that format, base species in that format, base species in the OTHER
+    format. Used only to decide whether a polite pause is needed.
+    """
+    base = munchstats_api.base_species(name)
+    other = (
+        munchstats_api.DEFAULT_FORMAT_ID
+        if usage_format == munchstats_api.CHAMPIONS_FORMAT_ID
+        else munchstats_api.CHAMPIONS_FORMAT_ID
+    )
+    rating = munchstats_api.DEFAULT_RATING
+    return [
+        f"usage_{usage_format}_{rating}_{name}",
+        f"usage_{usage_format}_{rating}_{base}",
+        f"usage_{other}_{rating}_{base}",
+    ]
+
+
+def usage_formats_for_tournaments(tournaments: list) -> list[str]:
+    """The set of usage datasets the baked tournaments map to, sorted.
+
+    Every Pokemon is baked under each of these directories so the frontend can
+    find it regardless of which tournament is selected.
+    """
+    formats = {
+        munchstats_api.usage_format_for_tournament(t.get("format", ""))
+        for t in tournaments
+    }
+    return sorted(formats)
+
+
+def _polite_pause_any(keys: list[str]) -> None:
+    """Sleep once when any key in ``keys`` is uncached (a request will happen)."""
+    if any(not _is_cached(key) for key in keys):
         time.sleep(REQUEST_DELAY)
 
 
@@ -310,7 +354,9 @@ def main(argv=None) -> int:
                     all_pokemon.add(mon["pokemon"])
 
     pokemon = sorted(all_pokemon)
-    print(f"\n[3/5] Baking spreads for {len(pokemon)} Pokemon...")
+    usage_formats = usage_formats_for_tournaments(selected)
+    print(f"\n[3/5] Baking spreads for {len(pokemon)} Pokemon "
+          f"x {len(usage_formats)} usage format(s): {', '.join(usage_formats)}...")
     slug_owner: dict[str, str] = {}
     collisions = 0
     for name in pokemon:
@@ -322,21 +368,21 @@ def main(argv=None) -> int:
             slug_owner[slug] = name
 
     for index, name in enumerate(pokemon, 1):
-        key = (
-            f"usage_{munchstats_api.DEFAULT_FORMAT_ID}_"
-            f"{munchstats_api.DEFAULT_RATING}_{name}"
-        )
-        _polite_pause(key)
-        raw = munchstats_api._fetch_usage(
-            name, munchstats_api.DEFAULT_FORMAT_ID, munchstats_api.DEFAULT_RATING
-        )
-        spreads = munchstats_api.get_spreads(name)
-        usage = munchstats_api.get_usage(name)
-        stripped_usage = strip_usage(usage, raw.get("pokemon_names") or [])
-        _write_json(
-            os.path.join(spreads_dir, f"{pokemon_slug(name)}.json"),
-            {"spreads": spreads, "usage": stripped_usage},
-        )
+        slug = pokemon_slug(name)
+        for usage_format in usage_formats:
+            # Pause once if any attempt in this format's fallback chain is
+            # uncached. Repeated formats across Pokemon hit the cache.
+            _polite_pause_any(_resolve_cache_keys(name, usage_format))
+            # get_spreads/get_usage take a TOURNAMENT format and map it; pass
+            # the usage format itself, which maps to itself (passthrough).
+            result = munchstats_api.get_spreads(name, usage_format)
+            usage = munchstats_api.get_usage(name, usage_format)
+            # Baked under the slug of the name AS IT APPEARS IN TEAMS (e.g.
+            # "salamence-mega"), so the frontend's pokemonSlug lookup finds it.
+            _write_json(
+                os.path.join(spreads_dir, usage_format, f"{slug}.json"),
+                build_spread_payload(result, usage),
+            )
         if index % 25 == 0 or index == len(pokemon):
             print(f"      {index}/{len(pokemon)} Pokemon baked")
 
@@ -346,6 +392,7 @@ def main(argv=None) -> int:
         "tournaments": len(selected),
         "days": days,
         "pokemon": len(pokemon),
+        "usageFormats": usage_formats,
     }
     _write_json(os.path.join(data_dir, "manifest.json"), manifest)
 
@@ -361,7 +408,11 @@ def main(argv=None) -> int:
     # --- report -----------------------------------------------------------
     total_bytes = _dir_size(data_dir)
     team_files = sorted(os.listdir(teams_dir)) if os.path.isdir(teams_dir) else []
-    spread_files = sorted(os.listdir(spreads_dir)) if os.path.isdir(spreads_dir) else []
+    spread_files: list[str] = []
+    for usage_format in usage_formats:
+        fmt_dir = os.path.join(spreads_dir, usage_format)
+        if os.path.isdir(fmt_dir):
+            spread_files.extend(os.listdir(fmt_dir))
     all_files = [f for f in team_files if f.endswith("_all.json")]
     largest = None
     largest_size = 0
@@ -376,7 +427,8 @@ def main(argv=None) -> int:
     print("-" * 68)
     print(f"  tournaments:     {len(selected)}")
     print(f"  team files:      {len(team_files)} ({len(all_files)} 'all' files)")
-    print(f"  spread files:    {len(spread_files)}")
+    print(f"  spread files:    {len(spread_files)} "
+          f"({len(usage_formats)} usage format dirs)")
     print(f"  docs/data size:  {total_bytes / (1024 * 1024):.2f} MB")
     print(f"  largest file:    {largest} ({largest_size / 1024:.1f} KB)")
     print(f"  size guard:      {'TRIGGERED' if all_guard_triggered else 'not triggered'}")

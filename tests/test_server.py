@@ -136,11 +136,53 @@ def test_spreads_rejects_overlong_pokemon_name(client):
 
 
 def test_spreads_valid_params_call_through(client, monkeypatch):
-    monkeypatch.setattr(munchstats_api, "get_spreads", lambda *a: [{"label": "x"}])
+    monkeypatch.setattr(
+        munchstats_api,
+        "get_spreads",
+        lambda *a: {
+            "spreads": [{"label": "x"}],
+            "natures": [{"name": "Timid", "pct": 48.1}],
+            "matched": True,
+            "requested": "Pikachu",
+            "resolved": "Pikachu",
+            "source": "championsdoubles",
+            "sourceLabel": "Champions (in-game)",
+            "natureInferred": True,
+        },
+    )
     monkeypatch.setattr(munchstats_api, "get_usage", lambda *a: {"pokemon": "Pikachu"})
     resp = client.get("/api/spreads/Pikachu?format=gen9championsvgc2026regmbbo3&rating=0")
     assert resp.status_code == 200
-    assert resp.get_json()["spreads"] == [{"label": "x"}]
+    body = resp.get_json()
+    assert body["spreads"] == [{"label": "x"}]
+    # Provenance fields pass through.
+    assert body["matched"] is True
+    assert body["requested"] == "Pikachu"
+    assert body["resolved"] == "Pikachu"
+    assert body["source"] == "championsdoubles"
+    assert body["sourceLabel"] == "Champions (in-game)"
+    assert body["natureInferred"] is True
+    assert body["natures"] == [{"name": "Timid", "pct": 48.1}]
+
+
+def test_spreads_defaults_to_current_tournament_format(client, monkeypatch):
+    captured = {}
+
+    def fake_get_spreads(pokemon, format_id, rating):
+        captured["format"] = format_id
+        return {
+            "spreads": [], "natures": [], "matched": False,
+            "requested": pokemon, "resolved": "", "source": "",
+            "sourceLabel": "", "natureInferred": False,
+        }
+
+    monkeypatch.setattr(munchstats_api, "get_spreads", fake_get_spreads)
+    monkeypatch.setattr(munchstats_api, "get_usage", lambda *a: {"pokemon": "Pikachu"})
+
+    resp = client.get("/api/spreads/Pikachu")
+    assert resp.status_code == 200
+    # No ?format= -> the current Reg M-C tournament format is used.
+    assert captured["format"] == "gen9championsvgc2026regmc"
 
 
 # ---------------------------------------------------------------------------

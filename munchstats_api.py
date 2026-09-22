@@ -19,9 +19,29 @@ Endpoint notes (all verified against the live service):
    object with ``spreads_list`` (label, pct), plus moves/items/abilities/
    natures/base stats/types.
 
-DEFAULT_FORMAT_ID is the gen-9 Champions Reg M-B Bo3 usage format. It is the
-closest available usage dataset and is what the MunchStats API serves for the
-Champions ruleset.
+DEFAULT_FORMAT_ID is the gen-9 Champions Reg M-B Bo3 usage format. It is a
+tournament dataset, but its roster differs from the Reg M-C tournaments the
+app browses, and it often has no entry for a Champions Pokemon.
+
+CHAMPIONS_FORMAT_ID (``championsdoubles``) is the in-game Champions dataset
+behind ``munchstats.com/champions/doubles/{BaseSpecies}``. It carries the full
+Reg M-C roster, but:
+
+  - it is keyed by BASE species, so a Mega form must be queried by its base
+    name (``Salamence-Mega`` -> ``Salamence``);
+  - its ``spreads_list`` entries are ``[spreadString, pct]`` with NO embedded
+    nature, and natures are a SEPARATE, INDEPENDENTLY-RANKED list. There is no
+    joint distribution, so a spread's nature cannot be known -- only guessed
+    from the top marginal. ``natureInferred`` records that.
+
+MunchStats never 404s on an unknown name; it silently fuzzy-substitutes a
+different Pokemon. Every lookup therefore checks the resolved name and walks a
+fallback chain (see ``_resolve``) until one actually matches.
+
+The public ``get_spreads``/``get_usage``/``get_best_spread`` functions take a
+TOURNAMENT regulation as their ``format_id`` argument and map it to the right
+usage dataset via ``usage_format_for_tournament`` (see
+``TOURNAMENT_FORMAT_TO_USAGE``).
 """
 
 from __future__ import annotations
@@ -45,7 +65,44 @@ USER_AGENT = (
 )
 
 DEFAULT_FORMAT_ID = "gen9championsvgc2026regmbbo3"
+CHAMPIONS_FORMAT_ID = "championsdoubles"
 DEFAULT_RATING = "0"
+
+# Tournament regulation -> the usage dataset whose roster actually covers it.
+#
+# Only two usage datasets exist upstream:
+#   - ``championsdoubles`` (Reg M-C in-game roster, incl. Megas);
+#   - ``gen9championsvgc2026regmbbo3`` (Reg M-B Bo3 tournament data).
+# Requesting regmc/regmcbo3/regma/regmabo3 silently returns the regmbbo3
+# payload, so we must never ask for them directly.
+#
+# The mapping is explicit for the regulations whose roster we know:
+#   - M-C and M-A are Champions regs, so ``championsdoubles`` is the only
+#     dataset that carries their roster;
+#   - M-B has an exact usage dataset (``regmbbo3``) whose spread labels embed
+#     the nature, so it is strictly better data than ``championsdoubles``.
+#
+# Evidence for the M-C/M-B split (verified against the live API):
+#   - Incineroar: regmbbo3 ``32/32/0/0/2/0`` (physical) vs championsdoubles
+#     ``32/0/14/0/20/0`` (bulky) -- the M-C bulky spread is the correct one;
+#   - Corviknight: regmbbo3 ``32/0/5/0/26/3`` vs championsdoubles
+#     ``32/0/32/0/2/0``;
+#   - Rillaboom is absent from the M-B roster (regmbbo3 fuzzy-substitutes
+#     Kingambit) but present in ``championsdoubles``.
+TOURNAMENT_FORMAT_TO_USAGE = {
+    "gen9championsvgc2026regmc": CHAMPIONS_FORMAT_ID,
+    "gen9championsvgc2026regma": CHAMPIONS_FORMAT_ID,
+    "gen9championsvgc2026regmb": DEFAULT_FORMAT_ID,
+}
+
+# Human-readable provenance labels for the usage datasets.
+SOURCE_LABELS = {
+    CHAMPIONS_FORMAT_ID: "Champions (in-game)",
+    DEFAULT_FORMAT_ID: "Reg M-B (Bo3)",
+}
+
+# Mega suffixes MunchStats folds into the base species for Champions data.
+_MEGA_SUFFIX_RE = re.compile(r"-Mega(?:-[XYZ])?$", re.IGNORECASE)
 
 # Bootstrap key for the embedded tournament list; the route ignores it and
 # returns every tournament regardless.
@@ -177,12 +234,70 @@ def get_teams(tournament_id: str, day: str = "all") -> list[dict]:
     return cache.get_or_set(cache_key, fetch, CACHE_TTL)
 
 
-def _parse_spread_label(label: str) -> dict | None:
-    """Parse ``"Adamant:32/32/0/0/2/0"`` into nature + SP map.
+def base_species(name: str) -> str:
+    """Strip a Mega suffix: 'Salamence-Mega'->'Salamence', 'Raichu-Mega-Y'->'Raichu'.
 
-    Returns ``None`` if the label is not in the expected shape.
+    Handles ``-Mega``, ``-Mega-X``, ``-Mega-Y`` and ``-Mega-Z``. Names without a
+    Mega suffix are returned unchanged (whitespace trimmed).
     """
-    nature, _, stats = label.partition(":")
+    stripped = (name or "").strip()
+    return _MEGA_SUFFIX_RE.sub("", stripped)
+
+
+def usage_format_for_tournament(tournament_format: str) -> str:
+    """Map a tournament regulation to the usage dataset that covers it.
+
+    The app browses tournaments (``gen9championsvgc2026regmc`` etc.) but
+    MunchStats only serves two real usage datasets. This picks the right one.
+
+    Rules, in order:
+      1. Strip a trailing ``bo3`` and lowercase, so ``...regmcbo3`` and
+         ``...regmc`` map the same way.
+      2. Use the explicit ``TOURNAMENT_FORMAT_TO_USAGE`` mapping when present.
+      3. Any other ``champions`` regulation -> ``CHAMPIONS_FORMAT_ID``: the
+         in-game Champions dataset carries the full current roster (incl.
+         Megas), which is the closest match for a Champions regulation.
+      4. Anything else (pre-Champions formats like ``gen9vgc2026regi`` or
+         ``gen9vgc2025regh``) -> ``DEFAULT_FORMAT_ID``. ``championsdoubles``
+         does not cover pre-Champions Pokemon (``Amoonguss`` and ``Urshifu``
+         both resolve to ``Rillaboom``), so it is useless there.
+
+    This is what fixes the wrong-spread bug: browsing an M-C tournament used to
+    fetch Reg M-B spreads, e.g. Incineroar ``32/32/0/0/2/0`` (M-B physical)
+    instead of the correct M-C ``32/0/14/0/20/0`` (bulky), and Corviknight
+    ``32/0/5/0/26/3`` instead of ``32/0/32/0/2/0``.
+    """
+    normalized = (tournament_format or "").strip().lower()
+    if normalized.endswith("bo3"):
+        normalized = normalized[: -len("bo3")]
+
+    if normalized in TOURNAMENT_FORMAT_TO_USAGE:
+        return TOURNAMENT_FORMAT_TO_USAGE[normalized]
+    if "champions" in normalized:
+        return CHAMPIONS_FORMAT_ID
+    return DEFAULT_FORMAT_ID
+
+
+def source_label(source: str) -> str:
+    """Human-readable label for a usage dataset id (raw id when unknown)."""
+    return SOURCE_LABELS.get(source, source)
+
+def _parse_spread_label(label: str) -> dict | None:
+    """Parse a spread label into a nature + SP map.
+
+    Accepts both shapes:
+      - ``"Adamant:32/32/0/0/2/0"`` (nature embedded in the label);
+      - ``"32/32/0/0/2/0"`` (nature supplied separately).
+
+    Returns ``{"nature": str|None, "sps": {...}}`` or ``None`` when the stat
+    part is not six slash-separated integers.
+    """
+    nature: str | None = None
+    stats = label
+    if ":" in label:
+        nature, _, stats = label.partition(":")
+        nature = nature.strip() or None
+
     parts = stats.split("/")
     if len(parts) != len(_SPREAD_KEYS):
         return None
@@ -193,11 +308,15 @@ def _parse_spread_label(label: str) -> dict | None:
         return None
 
     sps = {key: value for key, value in zip(_SPREAD_KEYS, values)}
-    return {"nature": nature.strip(), "sps": sps}
+    return {"nature": nature, "sps": sps}
 
 
-def _parse_spreads(raw_list: list) -> list[dict]:
-    """Turn a raw ``spreads_list`` into normalized, pct-sorted spread dicts."""
+def _parse_spreads(raw_list: list, default_nature: str | None = None) -> list[dict]:
+    """Turn a raw ``spreads_list`` into normalized, pct-sorted spread dicts.
+
+    ``default_nature`` is used for the nature-less ``championsdoubles`` shape
+    (the top marginal nature is the best available guess).
+    """
     spreads: list[dict] = []
 
     for entry in raw_list or []:
@@ -215,7 +334,7 @@ def _parse_spreads(raw_list: list) -> list[dict]:
             {
                 "label": label,
                 "pct": pct_value,
-                "nature": parsed["nature"],
+                "nature": parsed["nature"] or default_nature,
                 "sps": parsed["sps"],
             }
         )
@@ -247,7 +366,12 @@ def _clean_list(raw_list: list, with_description: bool = True) -> list[dict]:
 
 
 def _fetch_usage(pokemon: str, format_id: str, rating: str) -> dict:
-    """Fetch and cache the raw usage payload for a Pokemon."""
+    """Fetch and cache the raw usage payload for a Pokemon.
+
+    The cache key includes the format id, so the same name fetched under
+    different formats never collides. Callers do the fallback logic on top of
+    this, so repeated lookups of a name do not re-fetch.
+    """
     cache_key = f"usage_{format_id}_{rating}_{pokemon}"
 
     def fetch() -> dict:
@@ -258,18 +382,136 @@ def _fetch_usage(pokemon: str, format_id: str, rating: str) -> dict:
     return cache.get_or_set(cache_key, fetch, CACHE_TTL)
 
 
+def _resolved_name(data: dict) -> str:
+    """The Pokemon the upstream payload actually describes.
+
+    ``selected_pokemon`` is the cleanest field; ``current_pokemon[0]`` is the
+    fallback for the ``championsdoubles`` shape.
+    """
+    selected = data.get("selected_pokemon")
+    if isinstance(selected, str) and selected:
+        return selected
+    current = data.get("current_pokemon")
+    if isinstance(current, (list, tuple)) and current and isinstance(current[0], str):
+        return current[0]
+    return ""
+
+
+def _resolve(
+    pokemon: str,
+    format_id: str = DEFAULT_FORMAT_ID,
+    rating: str = DEFAULT_RATING,
+) -> dict:
+    """Walk the fallback chain and return the first payload that matches.
+
+    Attempts, in order:
+      1. ``format_id`` with the exact name;
+      2. ``format_id`` with the base species (Mega suffix stripped);
+      3. the OTHER usage dataset with the base species -- ``championsdoubles``
+         when the primary is the Reg M-B tournament dataset, and vice versa.
+         This is the format-aware fallback: an M-C lookup that misses in
+         ``championsdoubles`` can still fall back to Reg M-B, and a Reg M-B
+         lookup can fall back to ``championsdoubles``.
+
+    A match means the resolved name equals the name we queried for that
+    attempt (case-insensitively). Returns a provenance dict::
+
+        {"data": dict, "matched": bool, "requested": str,
+         "resolved": str, "source": str, "sourceLabel": str,
+         "nature_inferred": bool, "base": str}
+
+    When nothing matches, ``data`` is the last payload fetched (or ``{}``) and
+    ``matched`` is False, so callers can still read whatever came back while
+    flagging it as assumed.
+    """
+    base = base_species(pokemon)
+    other_format = (
+        DEFAULT_FORMAT_ID
+        if format_id == CHAMPIONS_FORMAT_ID
+        else CHAMPIONS_FORMAT_ID
+    )
+    attempts = [
+        (format_id, pokemon),
+        (format_id, base),
+        (other_format, base),
+    ]
+
+    last_data: dict = {}
+    last_resolved = ""
+    last_source = format_id
+    for source, query in attempts:
+        data = _fetch_usage(query, source, rating)
+        resolved = _resolved_name(data)
+        last_data, last_resolved, last_source = data, resolved, source
+        if resolved and resolved.lower() == query.lower():
+            return {
+                "data": data,
+                "matched": True,
+                "requested": pokemon,
+                "resolved": resolved,
+                "source": source,
+                "sourceLabel": source_label(source),
+                "nature_inferred": source == CHAMPIONS_FORMAT_ID,
+                "base": base,
+            }
+
+    return {
+        "data": last_data,
+        "matched": False,
+        "requested": pokemon,
+        "resolved": last_resolved,
+        "source": last_source,
+        "sourceLabel": source_label(last_source),
+        "nature_inferred": last_source == CHAMPIONS_FORMAT_ID,
+        "base": base,
+    }
+
+
 def get_spreads(
     pokemon: str,
     format_id: str = DEFAULT_FORMAT_ID,
     rating: str = DEFAULT_RATING,
-) -> list[dict]:
-    """Return usage spreads for a Pokemon, most common first.
+) -> dict:
+    """Return usage spreads for a Pokemon plus provenance, most common first.
 
-    Each entry is ``{label, pct, nature, sps}`` where ``sps`` uses our short
-    stat keys. Returns ``[]`` when the payload has no ``spreads_list``.
+    ``format_id`` is a TOURNAMENT regulation (e.g. ``gen9championsvgc2026regmc``);
+    it is mapped to the usage dataset that covers it via
+    :func:`usage_format_for_tournament` before the lookup.
+
+    Each spread is ``{label, pct, nature, sps}`` where ``sps`` uses our short
+    stat keys. ``natures`` is the full ranked nature list when the source
+    exposes one (``championsdoubles`` only), else ``[]``.
+
+    ``matched`` is False when every attempt in the fallback chain resolved to a
+    different Pokemon (MunchStats fuzzy-substitutes instead of 404ing); callers
+    should flag the data as assumed and fall back to a default spread.
+    ``natureInferred`` is True only for the ``championsdoubles`` source, where
+    spreads and natures are independent marginals and the nature attached to
+    each spread is the top marginal guess, not a known pairing.
+    ``sourceLabel`` is the human-readable name of the dataset used.
     """
-    data = _fetch_usage(pokemon, format_id, rating)
-    return _parse_spreads(data.get("spreads_list") or [])
+    resolved = _resolve(pokemon, usage_format_for_tournament(format_id), rating)
+    data = resolved["data"]
+
+    natures = _clean_list(data.get("natures_list") or [])
+    top_nature = natures[0]["name"] if natures else None
+    spreads = _parse_spreads(data.get("spreads_list") or [], default_nature=top_nature)
+
+    # Never hand back a substituted Pokemon's spreads: unmatched means no data.
+    if not resolved["matched"]:
+        spreads = []
+        natures = []
+
+    return {
+        "spreads": spreads,
+        "natures": natures,
+        "matched": resolved["matched"],
+        "requested": resolved["requested"],
+        "resolved": resolved["resolved"],
+        "source": resolved["source"],
+        "sourceLabel": resolved["sourceLabel"],
+        "natureInferred": resolved["nature_inferred"],
+    }
 
 
 def get_usage(
@@ -277,22 +519,27 @@ def get_usage(
     format_id: str = DEFAULT_FORMAT_ID,
     rating: str = DEFAULT_RATING,
 ) -> dict:
-    """Return a cleaned usage summary for a Pokemon.
+    """Return a cleaned usage summary for a Pokemon, with provenance.
 
-    Includes moves, items, abilities and natures (each ``{name, pct}``), plus
-    raw base stats and types. Missing fields come back as empty lists/values.
-
-    ``matched`` is False when the API silently substituted a different Pokemon
-    (it fuzzy-matches unknown names instead of 404ing); callers should flag the
-    data as assumed in that case.
+    ``format_id`` is a TOURNAMENT regulation, mapped internally like
+    :func:`get_spreads`. Includes moves, items, abilities and natures (each
+    ``{name, pct}``), plus raw base stats and types. Missing fields come back as
+    empty lists/values. Uses the same fallback chain as :func:`get_spreads`, so
+    the provenance fields (``matched``, ``requested``, ``resolved``, ``source``,
+    ``sourceLabel``, ``natureInferred``) describe the payload actually used.
     """
-    data = _fetch_usage(pokemon, format_id, rating)
-    selected = data.get("selected_pokemon") or pokemon
+    resolved = _resolve(pokemon, usage_format_for_tournament(format_id), rating)
+    data = resolved["data"]
+    selected = _resolved_name(data) or pokemon
 
     return {
         "pokemon": selected,
-        "requested": pokemon,
-        "matched": selected.lower() == pokemon.lower(),
+        "requested": resolved["requested"],
+        "resolved": resolved["resolved"],
+        "source": resolved["source"],
+        "sourceLabel": resolved["sourceLabel"],
+        "natureInferred": resolved["nature_inferred"],
+        "matched": resolved["matched"],
         "moves": _clean_list(data.get("moves_list") or []),
         "items": _clean_list(data.get("items_list") or []),
         "abilities": _clean_list(data.get("abilities_list") or []),
@@ -308,6 +555,12 @@ def get_best_spread(
     format_id: str = DEFAULT_FORMAT_ID,
     rating: str = DEFAULT_RATING,
 ) -> dict | None:
-    """Return the single most common spread for a Pokemon, or ``None``."""
-    spreads = get_spreads(pokemon, format_id, rating)
-    return spreads[0] if spreads else None
+    """Return the single most common spread for a Pokemon, or ``None``.
+
+    Respects the fallback chain: returns ``None`` when no attempt matched, so
+    callers never get a substituted Pokemon's spread.
+    """
+    result = get_spreads(pokemon, format_id, rating)
+    if not result["matched"] or not result["spreads"]:
+        return None
+    return result["spreads"][0]

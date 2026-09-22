@@ -22,6 +22,10 @@ app = Flask(__name__)
 # Reject oversized request bodies before they are read into memory.
 app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024  # 1 MB
 
+# The current tournament regulation. The frontend normally passes the selected
+# tournament's format explicitly; this is only the fallback when it does not.
+DEFAULT_TOURNAMENT_FORMAT = "gen9championsvgc2026regmc"
+
 
 @app.route("/")
 def index():
@@ -67,23 +71,44 @@ def api_spreads(pokemon: str):
     """Return usage spreads and a usage summary for a Pokemon.
 
     Query params:
-      - format: MunchStats format id (defaults to the Champions Reg M-B Bo3).
+      - format: TOURNAMENT regulation (defaults to the current Reg M-C,
+        ``gen9championsvgc2026regmc``). It is mapped internally to the usage
+        dataset that actually covers that regulation.
       - rating: rating bucket, default ``0``.
 
     ``format``/``rating`` are validated against a strict allowlist and
     ``pokemon`` is length-capped before any upstream request or cache write.
+
+    The response carries the provenance of the fallback chain that was used:
+    ``matched`` (False when MunchStats substituted a different Pokemon),
+    ``requested``/``resolved`` names, ``source`` format id, ``sourceLabel``
+    (human-readable dataset name), ``natureInferred`` (True when the source
+    ranks spreads and natures independently) and the ranked ``natures`` list
+    the UI can offer.
     """
-    format_id = request.args.get("format", munchstats_api.DEFAULT_FORMAT_ID)
+    format_id = request.args.get("format", DEFAULT_TOURNAMENT_FORMAT)
     rating = request.args.get("rating", munchstats_api.DEFAULT_RATING)
     try:
         munchstats_api.validate_usage_params(pokemon, format_id, rating)
-        spreads = munchstats_api.get_spreads(pokemon, format_id, rating)
+        result = munchstats_api.get_spreads(pokemon, format_id, rating)
         usage = munchstats_api.get_usage(pokemon, format_id, rating)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 502
-    return jsonify({"spreads": spreads, "usage": usage})
+    return jsonify(
+        {
+            "spreads": result["spreads"],
+            "natures": result["natures"],
+            "matched": result["matched"],
+            "requested": result["requested"],
+            "resolved": result["resolved"],
+            "source": result["source"],
+            "sourceLabel": result["sourceLabel"],
+            "natureInferred": result["natureInferred"],
+            "usage": usage,
+        }
+    )
 
 
 @app.route("/api/team", methods=["POST"])

@@ -16,7 +16,7 @@
  * subpath (/repo-name/):
  *   tournaments -> ./data/tournaments.json
  *   teams       -> ./data/teams/{tournamentId}_{day}.json
- *   spreads     -> ./data/spreads/{pokemonSlug}.json
+ *   spreads     -> ./data/spreads/{usageFormat}/{pokemonSlug}.json
  *
  * A missing static file (a day filter that was not baked, or a Pokemon with
  * no spreads) resolves to an empty result with `missing: true` instead of
@@ -31,11 +31,48 @@
     var MANIFEST_PATH = "./data/manifest.json";
     var POKEPASTE_BASE = "https://pokepast.es";
 
+    // Usage datasets MunchStats actually serves. Mirrors munchstats_api.py.
+    var CHAMPIONS_FORMAT_ID = "championsdoubles";
+    var DEFAULT_FORMAT_ID = "gen9championsvgc2026regmbbo3";
+
+    // Tournament regulation -> usage dataset. Mirrors
+    // TOURNAMENT_FORMAT_TO_USAGE in munchstats_api.py; the build bakes the
+    // spread files under these usage-format directories.
+    var TOURNAMENT_FORMAT_TO_USAGE = {
+        "gen9championsvgc2026regmc": CHAMPIONS_FORMAT_ID,
+        "gen9championsvgc2026regma": CHAMPIONS_FORMAT_ID,
+        "gen9championsvgc2026regmb": DEFAULT_FORMAT_ID,
+    };
+
     // pokepaste ids are hex strings, 8-32 chars (mirrors pokepaste_api.py).
     var PASTE_ID_RE = /^[0-9a-fA-F]{8,32}$/;
 
     var resolvedMode = null;
     var modePromise = null;
+
+    /**
+     * Map a tournament regulation to the usage dataset that covers it.
+     *
+     * MUST stay identical to usage_format_for_tournament() in
+     * munchstats_api.py: strip a trailing "bo3", lowercase, use the explicit
+     * mapping, else any other "champions" regulation -> championsdoubles, else
+     * (pre-Champions) -> the Reg M-B tournament dataset.
+     * @param {string} tournamentFormat
+     * @returns {string}
+     */
+    function usageFormatForTournament(tournamentFormat) {
+        var normalized = String(tournamentFormat == null ? "" : tournamentFormat)
+            .trim()
+            .toLowerCase();
+        if (normalized.slice(-3) === "bo3") {
+            normalized = normalized.slice(0, -3);
+        }
+        if (Object.prototype.hasOwnProperty.call(TOURNAMENT_FORMAT_TO_USAGE, normalized)) {
+            return TOURNAMENT_FORMAT_TO_USAGE[normalized];
+        }
+        if (normalized.indexOf("champions") !== -1) return CHAMPIONS_FORMAT_ID;
+        return DEFAULT_FORMAT_ID;
+    }
 
     /**
      * Filesystem-safe lowercase slug for a Pokemon name.
@@ -138,18 +175,52 @@
         );
     }
 
-    /** GET usage spreads + summary for a Pokemon. */
-    async function getSpreads(pokemon) {
+    /**
+     * GET usage spreads + summary for a Pokemon.
+     *
+     * ``tournamentFormat`` is the selected tournament's regulation (e.g.
+     * ``gen9championsvgc2026regmc``). In static mode it selects the baked
+     * ``spreads/{usageFormat}/`` directory; in api mode it is passed through
+     * as ``?format=`` for the server to map.
+     *
+     * Returns the spread list plus the provenance of the fallback chain that
+     * produced it: `matched`, `requested`, `resolved`, `source`, `sourceLabel`,
+     * `natureInferred` and the ranked `natures` list (empty when the source
+     * has none).
+     * @param {string} pokemon
+     * @param {string} [tournamentFormat]
+     */
+    async function getSpreads(pokemon, tournamentFormat) {
         var mode = await resolveMode();
         if (mode === "static") {
-            var url = "./data/spreads/" + encodeURIComponent(pokemonSlug(pokemon)) + ".json";
+            var usageFormat = usageFormatForTournament(tournamentFormat);
+            var url = "./data/spreads/" + encodeURIComponent(usageFormat) + "/" +
+                encodeURIComponent(pokemonSlug(pokemon)) + ".json";
             var data = await fetchJSON(url);
             if (!data || data.missing) {
-                return { spreads: [], usage: null, missing: true };
+                return {
+                    spreads: [], usage: null, natures: [], matched: false,
+                    requested: pokemon, resolved: "", source: "", sourceLabel: "",
+                    natureInferred: false, missing: true,
+                };
             }
-            return { spreads: data.spreads || [], usage: data.usage || null };
+            return {
+                spreads: data.spreads || [],
+                usage: data.usage || null,
+                natures: data.natures || [],
+                matched: data.matched !== false,
+                requested: data.requested || pokemon,
+                resolved: data.resolved || "",
+                source: data.source || "",
+                sourceLabel: data.sourceLabel || data.source || "",
+                natureInferred: data.natureInferred === true,
+            };
         }
-        return fetchJSON("/api/spreads/" + encodeURIComponent(pokemon));
+        var apiUrl = "/api/spreads/" + encodeURIComponent(pokemon);
+        if (tournamentFormat) {
+            apiUrl += "?format=" + encodeURIComponent(tournamentFormat);
+        }
+        return fetchJSON(apiUrl);
     }
 
     /**
@@ -195,6 +266,7 @@
         get mode() { return resolvedMode; },
         ready: resolveMode,
         pokemonSlug: pokemonSlug,
+        usageFormatForTournament: usageFormatForTournament,
         extractPasteId: extractPasteId,
         getTournaments: getTournaments,
         getTeams: getTeams,

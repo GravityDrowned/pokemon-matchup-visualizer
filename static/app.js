@@ -662,22 +662,37 @@
 
     /**
      * Fetch usage spreads for one opponent Pokemon and pick a default.
+     *
+     * The response carries provenance from the backend's fallback chain:
+     * `matched` is False only when MunchStats substituted a different Pokemon;
+     * `natureInferred` is True when the source (championsdoubles) ranks spreads
+     * and natures independently, so the attached nature is a guess and the UI
+     * offers the ranked `natures` list instead of pretending it is known.
+     * `sourceLabel` names the dataset the spread came from.
      * @param {object} mon - raw team member
+     * @param {string} tournamentFormat - selected tournament's regulation
      * @returns {Promise<{set:object, entry:object}>}
      */
-    async function buildOppMon(mon) {
+    async function buildOppMon(mon, tournamentFormat) {
         var spreads = [];
         var usage = null;
+        var natures = [];
+        var matched = false;
+        var natureInferred = false;
+        var sourceLabel = "";
         try {
-            var data = await window.DataSource.getSpreads(mon.pokemon);
+            var data = await window.DataSource.getSpreads(mon.pokemon, tournamentFormat);
             spreads = (data && data.spreads) || [];
             usage = (data && data.usage) || null;
+            natures = (data && data.natures) || [];
+            matched = !!(data && data.matched !== false && spreads.length);
+            natureInferred = !!(data && data.natureInferred);
+            sourceLabel = (data && data.sourceLabel) || "";
         } catch (err) {
             usage = null;
             spreads = [];
         }
 
-        var matched = !!(usage && usage.matched !== false && spreads.length);
         var options, assumed;
         if (matched) {
             options = spreads;
@@ -707,8 +722,11 @@
             entry: {
                 spreads: options,
                 chosenIndex: 0,
-                matched: !!(usage && usage.matched !== false),
+                matched: matched,
                 assumed: assumed,
+                natureInferred: natureInferred,
+                natures: natures,
+                sourceLabel: sourceLabel,
             },
         };
     }
@@ -731,7 +749,11 @@
 
         try {
             var mons = (team.team || []).slice(0, 6);
-            var built = await Promise.all(mons.map(buildOppMon));
+            var tournamentFormat = state.selectedTournament
+                ? state.selectedTournament.format : "";
+            var built = await Promise.all(mons.map(function (mon) {
+                return buildOppMon(mon, tournamentFormat);
+            }));
             if (!isCurrent("team", token)) return;
             state.oppTeam = built.map(function (b) { return b.set; });
             state.oppSpreads = {};
@@ -745,6 +767,25 @@
             if (!isCurrent("team", token)) return;
             setStatus($("opp-status"), "Error: " + err.message, "error");
         }
+    }
+
+    /**
+     * Label for one spread <option>.
+     *
+     * When the nature was inferred (independent marginals), the spread string
+     * has no known nature, so it is shown bare: "2/0/0/32/0/32 (43.2%)".
+     * Otherwise the embedded nature is kept: "Adamant:32/32/0/0/2/0 (14.0%)".
+     * @param {object} sp
+     * @param {boolean} natureInferred
+     * @returns {string}
+     */
+    function spreadOptionText(sp, natureInferred) {
+        var label = String(sp.label == null ? "" : sp.label);
+        if (natureInferred && label.indexOf(":") !== -1) {
+            label = label.slice(label.indexOf(":") + 1);
+        }
+        var pctText = (sp.pct == null) ? "assumed" : (sp.pct + "%");
+        return label + " (" + pctText + ")";
     }
 
     /** Render the selected opponent team with per-mon spread dropdowns. */
@@ -762,7 +803,10 @@
             var mon = (state.selectedTeam && state.selectedTeam.team || []).filter(function (m) {
                 return m.pokemon === set.species;
             })[0] || {};
-            var entry = state.oppSpreads[set.species] || { spreads: [], chosenIndex: 0, matched: false, assumed: true };
+            var entry = state.oppSpreads[set.species] || {
+                spreads: [], chosenIndex: 0, matched: false, assumed: true,
+                natureInferred: false, natures: [], sourceLabel: "",
+            };
 
             var card = document.createElement("div");
             card.className = "opp-card";
@@ -773,7 +817,9 @@
             var title = document.createElement("div");
             var badge = (entry.assumed || !entry.matched)
                 ? '<span class="badge" title="No real usage data; a default spread is assumed.">assumed</span>'
-                : "";
+                : (entry.natureInferred
+                    ? '<span class="badge badge-info" title="Spreads and natures are ranked independently by the source; the nature is the top marginal, not a known pairing.">nature inferred</span>'
+                    : "");
             title.innerHTML = '<div class="opp-card-title">' + escapeHtml(set.species) + badge + "</div>" +
                 '<div class="opp-card-sub">' + escapeHtml(set.item || "no item") + " \u00b7 " +
                 escapeHtml(set.ability || "no ability") + "</div>";
@@ -786,8 +832,7 @@
             entry.spreads.forEach(function (sp, i) {
                 var opt = document.createElement("option");
                 opt.value = String(i);
-                var pctText = (sp.pct == null) ? "assumed" : (sp.pct + "%");
-                opt.textContent = sp.label + " (" + pctText + ")";
+                opt.textContent = spreadOptionText(sp, entry.natureInferred);
                 if (i === entry.chosenIndex) opt.selected = true;
                 select.appendChild(opt);
             });
@@ -795,6 +840,40 @@
                 setOppSpread(set.species, Number(select.value));
             });
             card.appendChild(select);
+
+            // Dataset provenance: which usage dataset the spread came from.
+            // The dataset is chosen to match the tournament's regulation (see
+            // DataSource.usageFormatForTournament).
+            if (entry.sourceLabel) {
+                var source = document.createElement("div");
+                source.className = "spread-source muted small";
+                source.textContent = entry.sourceLabel;
+                source.title = "Spread dataset chosen to match this tournament's " +
+                    "regulation. Different regulations have different rosters and " +
+                    "usage, so the dataset changes with the selected tournament.";
+                card.appendChild(source);
+            }
+
+            // Nature dropdown. Only shown when the source exposes a ranked
+            // nature list (championsdoubles). The nature is independent of the
+            // chosen spread, so changing it must not touch the SPs.
+            if (entry.natures && entry.natures.length) {
+                var natureSelect = document.createElement("select");
+                natureSelect.className = "select-input";
+                natureSelect.setAttribute("aria-label", "Nature for " + set.species);
+                entry.natures.forEach(function (n) {
+                    var opt = document.createElement("option");
+                    opt.value = n.name;
+                    var pctText = (n.pct == null) ? "" : " (" + n.pct + "%)";
+                    opt.textContent = n.name + pctText;
+                    if (n.name === set.nature) opt.selected = true;
+                    natureSelect.appendChild(opt);
+                });
+                natureSelect.addEventListener("change", function () {
+                    setOppNature(set.species, natureSelect.value);
+                });
+                card.appendChild(natureSelect);
+            }
 
             if (set.warnings && set.warnings.length) {
                 var warn = document.createElement("div");
@@ -841,6 +920,10 @@
 
     /**
      * Change the chosen spread for one opponent Pokemon.
+     *
+     * When the nature was inferred, the spread's nature is only the top
+     * marginal guess and the user may have picked a different one, so the
+     * nature is left alone. Otherwise the spread embeds a known nature.
      * @param {string} pokemon
      * @param {number} index
      */
@@ -852,8 +935,23 @@
         var set = state.oppTeam.filter(function (s) { return s.species === pokemon; })[0];
         if (set) {
             set.sps = sp.sps;
-            set.nature = sp.nature || set.nature;
+            if (!entry.natureInferred && sp.nature) set.nature = sp.nature;
         }
+        recompute();
+    }
+
+    /**
+     * Change the chosen nature for one opponent Pokemon.
+     *
+     * The nature is independent of the spread, so only the nature changes; the
+     * SPs stay exactly as chosen.
+     * @param {string} pokemon
+     * @param {string} nature
+     */
+    function setOppNature(pokemon, nature) {
+        var set = state.oppTeam.filter(function (s) { return s.species === pokemon; })[0];
+        if (!set) return;
+        set.nature = nature;
         recompute();
     }
 
@@ -1049,6 +1147,7 @@
         normalizeName: normalizeName,
         selectTeam: selectTeam,
         setOppSpread: setOppSpread,
+        setOppNature: setOppNature,
         setOppTerastallized: setOppTerastallized,
         setField: setField,
         recompute: recompute,

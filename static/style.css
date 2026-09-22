@@ -294,6 +294,15 @@ h3 { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.04em; colo
     margin-left: 0.3rem;
     vertical-align: middle;
 }
+.badge-info {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+.spread-source {
+    margin-top: 0.25rem;
+    font-size: 0.68rem;
+    cursor: help;
+}
 
 /* ---------------------------------------------------------------- sprites */
 

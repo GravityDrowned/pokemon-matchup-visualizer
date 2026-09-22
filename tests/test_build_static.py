@@ -109,28 +109,62 @@ RAW_USAGE = {
     "teammates_list": [["Incineroar", "30.0"]] * 50,
 }
 
-RAW_POKEMON_NAMES = [
-    ["Kingambit", "41.72", [81, 11], "up"],
-    ["Incineroar", "32.15", [60, 7], "down"],
-]
+RAW_SPREADS = {
+    "spreads": [{"label": "Adamant:32/32/0/0/2/0", "pct": 14.03, "nature": "Adamant",
+                 "sps": {"hp": 32, "at": 32, "df": 0, "sa": 0, "sd": 2, "sp": 0}}],
+    "natures": [{"name": "Adamant", "pct": 92.945}],
+    "matched": True,
+    "requested": "Kingambit",
+    "resolved": "Kingambit",
+    "source": "gen9championsvgc2026regmbbo3",
+    "sourceLabel": "Reg M-B (Bo3)",
+    "natureInferred": False,
+    # Not part of the baked payload.
+    "pokemon_names": ["Kingambit", "Incineroar"],
+}
 
 
-def test_strip_usage_keeps_used_fields_and_drops_huge_ones():
-    stripped = build_static.strip_usage(RAW_USAGE, RAW_POKEMON_NAMES)
+def test_build_spread_payload_keeps_only_used_fields():
+    payload = build_static.build_spread_payload(RAW_SPREADS, RAW_USAGE)
 
-    for key in ("evs_list", "graph_data", "available_months", "teammates_list"):
-        assert key not in stripped
-    assert stripped["base_stats"] == [100, 135, 120, 60, 85, 50]
-    assert stripped["types"] == ["Dark", "Steel"]
-    assert stripped["moves"][0]["name"] == "Sucker Punch"
-    # pokemon_names is reduced to names only (frontend only needs the names).
-    assert stripped["pokemon_names"] == ["Kingambit", "Incineroar"]
+    assert set(payload) == {
+        "spreads", "natures", "matched", "requested", "resolved",
+        "source", "sourceLabel", "natureInferred", "base_stats", "types",
+    }
+    # Moves/items/abilities are dropped -- the UI does not use them.
+    for key in ("moves", "items", "abilities", "pokemon_names", "tera_types"):
+        assert key not in payload
+    assert payload["base_stats"] == [100, 135, 120, 60, 85, 50]
+    assert payload["types"] == ["Dark", "Steel"]
+    assert payload["sourceLabel"] == "Reg M-B (Bo3)"
+    assert payload["spreads"][0]["label"] == "Adamant:32/32/0/0/2/0"
 
 
-def test_strip_usage_shrinks_payload_substantially():
-    raw_size = len(json.dumps(RAW_USAGE))
-    stripped_size = len(json.dumps(build_static.strip_usage(RAW_USAGE, [])))
+def test_build_spread_payload_shrinks_payload_substantially():
+    raw_size = len(json.dumps(RAW_USAGE)) + len(json.dumps(RAW_SPREADS))
+    stripped_size = len(json.dumps(build_static.build_spread_payload(RAW_SPREADS, RAW_USAGE)))
     assert stripped_size < raw_size / 4
+
+
+# ---------------------------------------------------------------------------
+# Usage-format set
+# ---------------------------------------------------------------------------
+
+
+def test_usage_formats_for_tournaments_maps_regulations():
+    tournaments = [
+        {"format": "gen9championsvgc2026regmc"},
+        {"format": "gen9championsvgc2026regma"},
+        {"format": "gen9championsvgc2026regmb"},
+        {"format": "gen9vgc2026regi"},
+        {"format": "gen9vgc2025regh"},
+    ]
+    formats = build_static.usage_formats_for_tournaments(tournaments)
+    assert formats == sorted(["championsdoubles", "gen9championsvgc2026regmbbo3"])
+
+
+def test_usage_formats_for_tournaments_empty():
+    assert build_static.usage_formats_for_tournaments([]) == []
 
 
 # ---------------------------------------------------------------------------
@@ -249,3 +283,94 @@ def test_parse_days_invalid_exits():
 
     with pytest.raises(SystemExit):
         build_static._parse_days("all,day3")
+
+
+# ---------------------------------------------------------------------------
+# Baked output (reads docs/ produced by a real build; offline)
+# ---------------------------------------------------------------------------
+
+
+def test_baked_salamence_mega_has_real_spreads():
+    """The Mega must be baked under its team-name slug with real data.
+
+    Regression: the primary format silently substitutes Sableye-Mega for
+    Salamence-Mega. The fallback chain must reach championsdoubles and bake
+    Salamence's real spreads under
+    docs/data/spreads/championsdoubles/salamence-mega.json.
+    """
+    import os
+
+    path = os.path.join(
+        build_static.DEFAULT_OUTPUT, "data", "spreads",
+        "championsdoubles", "salamence-mega.json",
+    )
+    with open(path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+
+    assert payload["matched"] is True
+    assert payload["resolved"] == "Salamence"
+    assert payload["source"] == "championsdoubles"
+    assert payload["sourceLabel"] == "Champions (in-game)"
+    assert payload["natureInferred"] is True
+    assert len(payload["spreads"]) > 0
+    assert payload["natures"]
+    top = payload["spreads"][0]
+    assert top["pct"] is not None
+    # Real spread, not the Sableye-Mega substitution.
+    assert top["label"] == "2/0/0/32/0/32"
+
+
+def test_baked_spread_layout_is_per_usage_format():
+    """Spreads live under spreads/{usageFormat}/{slug}.json, not flat."""
+    import os
+
+    spreads_root = os.path.join(build_static.DEFAULT_OUTPUT, "data", "spreads")
+    entries = set(os.listdir(spreads_root))
+    assert "championsdoubles" in entries
+    assert "gen9championsvgc2026regmbbo3" in entries
+    # The old flat layout must be gone.
+    assert not any(name.endswith(".json") for name in entries)
+
+    for usage_format in ("championsdoubles", "gen9championsvgc2026regmbbo3"):
+        fmt_dir = os.path.join(spreads_root, usage_format)
+        assert os.path.isdir(fmt_dir)
+        assert any(name.endswith(".json") for name in os.listdir(fmt_dir))
+
+
+def test_baked_payload_has_no_moves_items_abilities():
+    """The stripped baked payload must not carry the unused lists."""
+    import os
+
+    path = os.path.join(
+        build_static.DEFAULT_OUTPUT, "data", "spreads",
+        "championsdoubles", "salamence-mega.json",
+    )
+    with open(path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+
+    for key in ("moves", "items", "abilities", "usage", "pokemon_names"):
+        assert key not in payload
+    assert set(payload) == {
+        "spreads", "natures", "matched", "requested", "resolved",
+        "source", "sourceLabel", "natureInferred", "base_stats", "types",
+    }
+
+
+def test_resolve_cache_keys_cover_the_fallback_chain():
+    keys = build_static._resolve_cache_keys(
+        "Salamence-Mega", "gen9championsvgc2026regmbbo3"
+    )
+    assert keys == [
+        "usage_gen9championsvgc2026regmbbo3_0_Salamence-Mega",
+        "usage_gen9championsvgc2026regmbbo3_0_Salamence",
+        "usage_championsdoubles_0_Salamence",
+    ]
+
+
+def test_resolve_cache_keys_other_format_when_championsdoubles():
+    keys = build_static._resolve_cache_keys("Salamence-Mega", "championsdoubles")
+    assert keys == [
+        "usage_championsdoubles_0_Salamence-Mega",
+        "usage_championsdoubles_0_Salamence",
+        "usage_gen9championsvgc2026regmbbo3_0_Salamence",
+    ]
